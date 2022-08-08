@@ -50,12 +50,33 @@ import firemark.util;
 
 immutable string versionString = "Firemark v0.1.0";
 
-immutable string info = q"INFO
-Usage: firemark [options] [-f path/to/favicons.sqlite] [-p path/to/places.sqlite]
-       firemark [options] [-x https://example.com]
-Downloads missing Firefox bookmark icons.
-https://github.com/ahmetsait/firemark
-INFO";
+immutable string helpString = q"HELP
+Usage:
+    firemark [options] -f path/to/favicons.sqlite -p path/to/places.sqlite
+        Downloads missing Firefox bookmark icons into 'favicons.sqlite'.
+    
+    firemark [options] -x https://example.com
+        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output.
+
+Options:
+    -f, --favicons=FILE
+        Path to 'favicons.sqlite' file.
+    -p, --places=FILE
+        Path to 'places.sqlite' file.
+    -j, --jobs=N
+        Number of concurrent jobs. Use it to speed up downloading process if you have too many bookmarks.
+        Anything more than '-j 3' is not recommended since servers might block you out because of rate limiting.
+    -x, --extract=URL
+        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output and exit.
+    -v, --verbose
+        Print diagnostic messages.
+    --version
+        Output version information and exit.
+    --help
+        Show this help information and exit.
+
+<https://github.com/ahmetsait/firemark>
+HELP";
 
 __gshared ubyte interrupted = 0;
 
@@ -75,7 +96,7 @@ int main(string[] args)
 {
 	string faviconsFilePath;
 	string placesFilePath;
-	int jobCount = 1;
+	int jobCount = 0; // 0 means we can only utilize the main thread with TaskPool.finish(true)
 	string extractUrl = null;
 	bool verboseOutput = false;
 	bool showVersion = false;
@@ -98,12 +119,12 @@ int main(string[] args)
 	try
 	{
 		opt = getopt(args,
-			"favicons|f", "Path to favicons.sqlite file. [Default: %s]".format(faviconsFilePath.escapeShellFileName), &faviconsFilePath,
-			"places|p", "Path to places.sqlite file. [Default: %s]".format(placesFilePath.escapeShellFileName), &placesFilePath,
-			"jobs|j", "Number of concurrent jobs. [Default: %d]".format(jobCount), &jobCount,
-			"extract|x", "Extract favicon URLs from web page with link[rel~=icon] selector and exit.", &extractUrl,
-			"verbose|v", "Print diagnostic info.", &verboseOutput,
-			"version", "Output version information.", &showVersion,
+			"favicons|f", &faviconsFilePath,
+			"places|p", &placesFilePath,
+			"jobs|j", &jobCount,
+			"extract|x", &extractUrl,
+			"verbose|v", &verboseOutput,
+			"version", &showVersion,
 		);
 	}
 	catch (Exception ex)
@@ -115,7 +136,7 @@ int main(string[] args)
 	
 	if (opt.helpWanted)
 	{
-		defaultGetoptPrinter(info, opt.options);
+		write(helpString);
 		return 0;
 	}
 	
@@ -171,7 +192,7 @@ int main(string[] args)
 	
 	if (placesFilePath == null || faviconsFilePath == null)
 	{
-		stderr.writeln("firemark: Missing 'places.sqlite' or 'favicons.sqlite' argument.");
+		stderr.writeln("firemark: Missing '--places' or '--favicons' arguments.");
 		stderr.writeln("Try 'firemark --help' for more information.");
 		return 1;
 	}
