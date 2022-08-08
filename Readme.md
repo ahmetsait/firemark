@@ -2,7 +2,7 @@
 
 ![Firemark Icon](icon.svg)  
 Firemark  
-[![GitHub](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
+![Platforms](https://img.shields.io/badge/platform-windows%20%7C%20linux-blue) ![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark) ![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
 ========
 </div>
 
@@ -11,6 +11,10 @@ Firemark is a command line program for downloading missing Firefox bookmark icon
 **Backup your `*.sqlite` files before modifying them with Firemark.**
 
 Firemark can also be used as a helper utility for extracting favicon links from a given URL as an alternative to various online favicon retrieval services. See the `--extract` [option](#documentation).
+
+Downloads
+---------
+Prebuilt binaries can be found in [Releases](https://github.com/ahmetsait/firemark/releases) section.
 
 Getting Started
 ---------------
