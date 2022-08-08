@@ -1,0 +1,17 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Debug",
+			"type": "gdb",
+			"request": "launch",
+			"target": "bin/debug-linux-x86_64/firemark",
+			"windows": {
+				"target": "bin\\debug-windows-x86_64\\firemark.exe"
+			},
+			"cwd": "${workspaceRoot}",
+			"valuesFormatting": "parseText",
+			"arguments": "-v -j 1"
+		}
+	]
+}
