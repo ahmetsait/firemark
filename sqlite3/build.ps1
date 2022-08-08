@@ -1,7 +1,15 @@
-﻿# Should probably use this to get VS path at some point: https://stackoverflow.com/a/65869986/3624513
-#Get-ChildItem HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall | foreach { Get-ItemProperty $_.PsPath } | where { $_.DisplayName -like '*Visual Studio*' -and $_.InstallLocation.Length -gt 0 } | sort InstallDate -Descending | foreach { (Join-Path $_.InstallLocation 'Common7\IDE') } | where { Test-Path $_ } | select -First 1
+﻿# https://stackoverflow.com/a/65869986/3624513
+$VS_INSTALL_DIR = Get-ChildItem HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall | foreach { Get-ItemProperty $_.PsPath } | where { $_.DisplayName -like '*Visual Studio*' -and $_.InstallLocation.Length -gt 0 } | sort InstallDate -Descending | foreach { $_.InstallLocation } | where { Test-Path $_ } | select -First 1
 
-$cl = "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64\cl.exe"
+# https://stackoverflow.com/a/2124759
+pushd "$VS_INSTALL_DIR\VC\Auxiliary\Build"
+cmd /c "vcvars64.bat&set" |
+foreach {
+	if ($_ -match "=") {
+		$v = $_.split("="); set-item -force -path "ENV:\$($v[0])" -value "$($v[1])"
+	}
+}
+popd
 
 $mainSource = "sqlite3.c"
 $outputFile = "sqlite3.obj"
@@ -27,5 +35,5 @@ else {
 }
 
 if ($outdated) {
-	& $cl /c "$mainSource" -o "$outputFile"
+	cl /c "$mainSource" /Fo:"$outputFile"
 }
