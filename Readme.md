@@ -2,7 +2,7 @@
 
 ![Firemark Icon](icon.svg)  
 Firemark  
-![Platforms](https://img.shields.io/badge/platform-windows%20%7C%20linux-blue) ![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark) ![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
+[![Platforms](https://img.shields.io/badge/platform-windows%20%7C%20linux-blue)](https://github.com/ahmetsait/firemark/releases) [![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark)](https://github.com/ahmetsait/firemark/releases) [![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total)](https://github.com/ahmetsait/firemark/releases) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
 ========
 </div>
 
@@ -65,7 +65,7 @@ Extract favicon URLs from web page with `link[rel~=icon]` selector to standard o
 Known Issues
 ------------
 - Firemark inserts the duplicate pages into moz_pages_w_icons table.
-- Some URLs takes too long to timeout if the server does not respond.
+- Some URLs take too long to timeout if the server does not respond.
 - Firemark might run out of file descriptors because of too many open connections.
 - Firemark inserts wrong `expire_ms` when there is no relevant info in response headers.
 
