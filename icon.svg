@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   version="1.1"
+   id="svg1881"
+   width="64"
+   height="64"
+   viewBox="0 0 64 64"
+   sodipodi:docname="icon.svg"
+   inkscape:version="1.2 (dc2aedaf03, 2022-05-15)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1885">
+    <inkscape:path-effect
+       effect="bool_op"
+       operand-path=""
+       id="path-effect3356"
+       is_visible="true"
+       lpeversion="1"
+       operation="diff"
+       swap-operands="false"
+       filltype-this="from-curve"
+       filter=""
+       filltype-operand="from-curve" />
+    <inkscape:path-effect
+       effect="bool_op"
+       operand-path=""
+       id="path-effect3354"
+       is_visible="true"
+       lpeversion="1"
+       operation="diff"
+       swap-operands="false"
+       filltype-this="from-curve"
+       filter=""
+       filltype-operand="from-curve" />
+    <filter
+       id="selectable_hidder_filter"
+       width="1"
+       height="1"
+       x="0"
+       y="0"
+       style="color-interpolation-filters:sRGB"
+       inkscape:label="LPE boolean visibility">
+      <feComposite
+         id="boolops_hidder_primitive"
+         result="composite1"
+         operator="arithmetic"
+         in2="SourceGraphic"
+         in="BackgroundImage"
+         k1="0"
+         k2="0"
+         k3="0"
+         k4="0" />
+    </filter>
+    <inkscape:path-effect
+       effect="bool_op"
+       operand-path=""
+       id="path-effect3348"
+       is_visible="true"
+       lpeversion="1"
+       operation="union"
+       swap-operands="false"
+       filltype-this="from-curve"
+       filter=""
+       filltype-operand="from-curve" />
+  </defs>
+  <sodipodi:namedview
+     id="namedview1883"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="true"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="12.265625"
+     inkscape:cx="31.959236"
+     inkscape:cy="32"
+     inkscape:window-width="1920"
+     inkscape:window-height="1001"
+     inkscape:window-x="-9"
+     inkscape:window-y="-9"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g1889">
+    <inkscape:page
+       x="0"
+       y="0"
+       id="page1887"
+       width="64"
+       height="64" />
+  </sodipodi:namedview>
+  <g
+     id="g1889"
+     inkscape:groupmode="layer"
+     inkscape:label="Page 1"
+     transform="matrix(1.3333333,0,0,-1.3333333,0,3333.3333)">
+    <path
+       id="path1899"
+       style="fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0;stroke-dasharray:none"
+       d="m 30.752052,2484.538 c -0.262899,-3.2108 -1.503684,-3.2399 -1.503684,-3.2399 -0.125996,2.4013 -1.243681,4.3344 -2.028824,5.412 -0.335604,0.4607 -0.731668,0.8725 -1.164333,1.2433 -2.813424,2.4103 -1.426048,6.1301 -1.426048,6.1301 -4.05016,-1.4012 -3.743677,-5.3859 -3.743677,-5.3859 0.307016,-3.7845 -1.488502,-5.4072 -1.488502,-5.4072 -1.116901,2.2328 -2.561743,2.2196 -2.561743,2.2196 0.47246,-0.7614 0.289395,-1.6656 0.05483,-2.287 -0.393574,-1.0418 -0.809894,-1.9875 -0.985664,-3.0512 l -4.26e-4,8e-4 c -0.344701,-2.0043 -0.07934,-3.1854 -0.07934,-3.1854 h 4.26e-4 c 0.565499,-4.1781 3.957218,-5.6868 5.554675,-6.1537 -0.955187,0.5161 -2.042094,1.4872 -2.281685,3.2588 h -4.36e-4 c 0,0 -0.03439,0.1531 -0.05018,0.4383 -0.01879,0.327 -0.01279,0.8291 0.09779,1.4717 l 4.26e-4,-6e-4 c 0.09184,0.5559 0.292853,1.0579 0.499071,1.5907 0.0309,0.079 0.06132,0.1589 0.09174,0.2393 0.14106,0.3726 0.250761,0.9145 -0.03265,1.3712 0,0 0.866506,0.019 1.535709,-1.3309 0,0 1.077037,0.9732 0.892616,3.2426 0,0 -0.183462,2.3893 2.245301,3.2292 0,0 -0.832166,-2.2302 0.854912,-3.6756 0.259334,-0.2224 0.496862,-0.4694 0.698469,-0.7455 0.470638,-0.646 1.14084,-1.8054 1.216267,-3.2455 0,0 0.744271,0.019 0.901606,1.9429 0,0 2.720802,-5.4153 -1.236028,-7.6588 0.382443,0.1163 0.757553,0.2571 1.123643,0.4222 7.6843,3.4633 2.815643,13.1545 2.815643,13.1545 m 6.164712,14.712 H 11.083333 a 5.1666669,5.1666669 0 0 1 -5.1666668,-5.1667 V 2452.75 l 18.0833358,12.9167 18.083333,-12.9167 v 41.3333 a 5.1666669,5.1666669 0 0 1 -5.166667,5.1667 z" />
+  </g>
+</svg>
