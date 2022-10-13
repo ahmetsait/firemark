@@ -423,7 +423,7 @@ struct HttpResponse {
 		linksLazilyParsed = true;
 		LinkHeader[] ret;
 
-		auto hdrPtr = "Link" in headersHash;
+		auto hdrPtr = "link" in headersHash;
 		if(hdrPtr is null)
 			return ret;
 
@@ -452,7 +452,10 @@ struct HttpResponse {
 					idx++;
 
 				string name = header[0 .. idx];
-				header = header[idx + 1 .. $];
+				if(idx + 1 < header.length)
+					header = header[idx + 1 .. $];
+				else
+					header = header[$ .. $];
 
 				string value;
 
@@ -764,7 +767,10 @@ struct Uri {
 				host = authority;
 			} else {
 				host = authority[0 .. idx2];
-				port = to!int(authority[idx2 + 1 .. $]);
+				if(idx2 + 1 < authority.length)
+					port = to!int(authority[idx2 + 1 .. $]);
+				else
+					port = 0;
 			}
 		}
 
@@ -1095,8 +1101,18 @@ class HttpRequest {
 		/// sent on the socket yet because the connection is busy.
 		pendingAvailableConnection,
 
+		/// connect has been called, but we're waiting on word of success
+		connecting,
+
+		/// connecting a ssl, needing this
+		sslConnectPendingRead,
+		/// ditto
+		sslConnectPendingWrite,
+
 		/// The headers are being sent now
 		sendingHeaders,
+
+		// FIXME: allow Expect: 100-continue and separate the body send
 
 		/// The body is being sent now
 		sendingBody,
@@ -1256,9 +1272,10 @@ class HttpRequest {
 
 		headers ~= "\r\n";
 
+		// FIXME: separate this for 100 continue
 		sendBuffer = cast(ubyte[]) headers ~ requestParameters.bodyData;
 
-		// import std.stdio; writeln("******* ", sendBuffer);
+		// import std.stdio; writeln("******* ", cast(string) sendBuffer);
 
 		responseData = HttpResponse.init;
 		responseData.requestParameters = requestParameters;
@@ -1325,6 +1342,36 @@ class HttpRequest {
 
 
 	version(arsd_http_internal_implementation) {
+
+	/++
+		Changes the limit of number of open, inactive sockets. Reusing connections can provide a significant
+		performance improvement, but the operating system can also impose a global limit on the number of open
+		sockets and/or files that you don't want to run into. This lets you choose a balance right for you.
+
+
+		When the total number of cached, inactive sockets approaches this maximum, it will check for ones closed by the
+		server first. If there are none already closed by the server, it will select sockets at random from its connection
+		cache and close them to make room for the new ones.
+
+		Please note:
+
+		$(LIST
+			* there is always a limit of six open sockets per domain, per the common practice suggested by the http standard
+			* the limit given here is thread-local. If you run multiple http clients/requests from multiple threads, don't set this too high or you might bump into the global limit from the OS.
+			* setting this too low can waste connections because the server might close them, but they will never be garbage collected since my current implementation won't check for dead connections except when it thinks it is running close to the limit.
+		)
+
+		Setting it just right for your use case may provide an up to 10x performance boost.
+
+		This implementation is subject to change. If it does, I'll document it, but may not bump the version number.
+
+		History:
+			Added August 10, 2022 (dub v10.9)
+	+/
+	static void setConnectionCacheSize(int max = 32) {
+		connectionCacheSize = max;
+	}
+
 	private static {
 		// we manage the actual connections. When a request is made on a particular
 		// host, we try to reuse connections. We may open more than one connection per
@@ -1333,10 +1380,87 @@ class HttpRequest {
 		// The key is the *domain name* and the port. Multiple domains on the same address will have separate connections.
 		Socket[][string] socketsPerHost;
 
-		void loseSocket(string host, ushort port, bool ssl, Socket s) {
-			import std.string;
-			auto key = format("http%s://%s:%s", ssl ? "s" : "", host, port);
+		// only one request can be active on a given socket (at least HTTP < 2.0) so this is that
+		HttpRequest[Socket] activeRequestOnSocket;
+		HttpRequest[] pending; // and these are the requests that are waiting
 
+		int cachedSockets;
+		int connectionCacheSize = 32;
+
+		/+
+			This is a somewhat expensive, but essential operation. If it isn't used in a heavy
+			application, you'll risk running out of file descriptors.
+		+/
+		void cleanOldSockets() {
+			static struct CloseCandidate {
+				string key;
+				Socket socket;
+			}
+
+			CloseCandidate[36] closeCandidates;
+			int closeCandidatesPosition;
+
+			outer: foreach(key, sockets; socketsPerHost) {
+				foreach(socket; sockets) {
+					if(socket in activeRequestOnSocket)
+						continue; // it is still in use; we can't close it
+
+					closeCandidates[closeCandidatesPosition++] = CloseCandidate(key, socket);
+					if(closeCandidatesPosition == closeCandidates.length)
+						break outer;
+				}
+			}
+
+			auto cc = closeCandidates[0 .. closeCandidatesPosition];
+
+			if(cc.length == 0)
+				return; // no candidates to even examine
+
+			// has the server closed any of these? if so, we also close and drop them
+			static SocketSet readSet = null;
+			if(readSet is null)
+				readSet = new SocketSet();
+			readSet.reset();
+
+			foreach(candidate; cc) {
+				readSet.add(candidate.socket);
+			}
+
+			int closeCount;
+
+			auto got = Socket.select(readSet, null, null, 0.msecs /* timeout, want it small since we just checking for eof */);
+			if(got > 0) {
+				foreach(ref candidate; cc) {
+					if(readSet.isSet(candidate.socket)) {
+						// if we can read when it isn't in use, that means eof; the
+						// server closed it.
+						candidate.socket.close();
+						loseSocketByKey(candidate.key, candidate.socket);
+						closeCount++;
+					}
+				}
+				debug(arsd_http2) writeln(closeCount, " from inactivity");
+			} else {
+				// and if not, of the remaining ones, close a few just at random to bring us back beneath the arbitrary limit.
+
+				while(cc.length > 0 && (cachedSockets - closeCount) > connectionCacheSize) {
+					import std.random;
+					auto idx = uniform(0, cc.length);
+
+					cc[idx].socket.close();
+					loseSocketByKey(cc[idx].key, cc[idx].socket);
+
+					cc[idx] = cc[$ - 1];
+					cc = cc[0 .. $-1];
+					closeCount++;
+				}
+				debug(arsd_http2) writeln(closeCount, " from randomness");
+			}
+
+			cachedSockets -= closeCount;
+		}
+
+		void loseSocketByKey(string key, Socket s) {
 			if(auto list = key in socketsPerHost) {
 				for(int a = 0; a < (*list).length; a++) {
 					if((*list)[a] is s) {
@@ -1350,6 +1474,13 @@ class HttpRequest {
 			}
 		}
 
+		void loseSocket(string host, ushort port, bool ssl, Socket s) {
+			import std.string;
+			auto key = format("http%s://%s:%s", ssl ? "s" : "", host, port);
+
+			loseSocketByKey(key, s);
+		}
+
 		Socket getOpenSocketOnHost(string proxy, string host, ushort port, bool ssl, string unixSocketPath, bool verifyPeer) {
 			Socket openNewConnection() {
 				Socket socket;
@@ -1357,10 +1488,13 @@ class HttpRequest {
 					version(with_openssl) {
 						loadOpenSsl();
 						socket = new SslClientSocket(family(unixSocketPath), SocketType.STREAM, host, verifyPeer);
+						socket.blocking = false;
 					} else
 						throw new Exception("SSL not compiled in");
-				} else
+				} else {
 					socket = new Socket(family(unixSocketPath), SocketType.STREAM);
+					socket.blocking = false;
+				}
 
 				// FIXME: connect timeout?
 				if(unixSocketPath) {
@@ -1391,6 +1525,8 @@ class HttpRequest {
 							// using the parent class functions let us bypass the encryption
 							socket.Socket.connect(pa);
 						}
+
+						socket.blocking = true; // FIXME total hack to simplify the code here since it isn't really using the event loop yet
 
 						string message;
 						if(ssl) {
@@ -1446,6 +1582,10 @@ class HttpRequest {
 				return socket;
 			}
 
+			// import std.stdio; writeln(cachedSockets);
+			if(cachedSockets > connectionCacheSize)
+				cleanOldSockets();
+
 			import std.string;
 			auto key = format("http%s://%s:%s", ssl ? "s" : "", host, port);
 
@@ -1463,7 +1603,7 @@ class HttpRequest {
 						assert(socket !is null);
 						assert(socket.handle() !is socket_t.init, socket is null ? "null" : socket.toString());
 						readSet.add(socket);
-						auto got = Socket.select(readSet, null, null, 5.msecs /* timeout */);
+						auto got = Socket.select(readSet, null, null, 0.msecs /* timeout, want it small since we just checking for eof */);
 						if(got > 0) {
 							// we can read something off this... but there aren't
 							// any active requests. Assume it is EOF and open a new one
@@ -1472,6 +1612,7 @@ class HttpRequest {
 							loseSocket(host, port, ssl, socket);
 							goto openNew;
 						}
+						cachedSockets--;
 						return socket;
 					}
 				}
@@ -1491,10 +1632,6 @@ class HttpRequest {
 			socketsPerHost[key] ~= socket;
 			return socket;
 		}
-
-		// only one request can be active on a given socket (at least HTTP < 2.0) so this is that
-		HttpRequest[Socket] activeRequestOnSocket;
-		HttpRequest[] pending; // and these are the requests that are waiting
 
 		SocketSet readSet;
 		SocketSet writeSet;
@@ -1625,7 +1762,7 @@ class HttpRequest {
 				if(socket !is null) {
 					activeRequestOnSocket[socket] = pc;
 					assert(pc.sendBuffer.length);
-					pc.state = State.sendingHeaders;
+					pc.state = State.connecting;
 
 					removeFromPending[removeFromPendingCount++] = pc;
 				}
@@ -1643,6 +1780,7 @@ class HttpRequest {
 				foreach(s; inactive[0 .. inactiveCount]) {
 					debug(arsd_http2) writeln("removing socket from active list ", cast(void*) s);
 					activeRequestOnSocket.remove(s);
+					cachedSockets++;
 				}
 			}
 
@@ -1680,7 +1818,7 @@ class HttpRequest {
 				if(timeo < minTimeout)
 					minTimeout = timeo;
 
-				if(request.state == State.sendingHeaders || request.state == State.sendingBody) {
+				if(request.state == State.connecting || request.state == State.sslConnectPendingWrite || request.state == State.sendingHeaders || request.state == State.sendingBody) {
 					writeSet.add(sock);
 					hadOne = true;
 				}
@@ -1703,7 +1841,10 @@ class HttpRequest {
 					if(request.timeoutFromInactivity <= now) {
 						request.state = HttpRequest.State.aborted;
 						request.responseData.code = 5;
-						request.responseData.codeText = "Request timed out";
+						if(request.state == State.connecting)
+							request.responseData.codeText = "Connect timed out";
+						else
+							request.responseData.codeText = "Request timed out";
 
 						inactive[inactiveCount++] = sock;
 						sock.close();
@@ -1727,11 +1868,78 @@ class HttpRequest {
 				else
 					return 3;
 			} else { /* ready */
+
+				void sslProceed(HttpRequest request, SslClientSocket s) {
+					try {
+						auto code = s.do_ssl_connect();
+						switch(code) {
+							case 0:
+								request.state = State.sendingHeaders;
+							break;
+							case SSL_ERROR_WANT_READ:
+								request.state = State.sslConnectPendingRead;
+							break;
+							case SSL_ERROR_WANT_WRITE:
+								request.state = State.sslConnectPendingWrite;
+							break;
+							default:
+								assert(0);
+						}
+					} catch(Exception e) {
+						request.state = State.aborted;
+
+						request.responseData.code = 2;
+						request.responseData.codeText = e.msg;
+						inactive[inactiveCount++] = s;
+						s.close();
+						loseSocket(request.requestParameters.host, request.requestParameters.port, request.requestParameters.ssl, s);
+					}
+				}
+
+
 				foreach(sock, request; activeRequestOnSocket) {
 					// always need to try to send first in part because http works that way but
 					// also because openssl will sometimes leave something ready to read even if we haven't
 					// sent yet (probably leftover data from the crypto negotiation) and if that happens ssl
 					// is liable to block forever hogging the connection and not letting it send...
+					if(request.state == State.connecting)
+					if(writeSet.isSet(sock) || readSet.isSet(sock)) {
+						int error;
+						int retopt = sock.getOption(SocketOptionLevel.SOCKET, SocketOption.ERROR, error);
+						if(retopt < 0 || error != 0) {
+							request.state = State.aborted;
+
+							request.responseData.code = 2;
+							try {
+								request.responseData.codeText = "connection failed - " ~ formatSocketError(error);
+							} catch(Exception e) {
+								request.responseData.codeText = "connection failed";
+							}
+							inactive[inactiveCount++] = sock;
+							sock.close();
+							loseSocket(request.requestParameters.host, request.requestParameters.port, request.requestParameters.ssl, sock);
+							continue;
+						} else {
+							if(auto s = cast(SslClientSocket) sock) {
+								sslProceed(request, s);
+								continue;
+							} else {
+								request.state = State.sendingHeaders;
+							}
+						}
+					}
+
+					if(request.state == State.sslConnectPendingRead)
+					if(readSet.isSet(sock)) {
+						sslProceed(request, cast(SslClientSocket) sock);
+						continue;
+					}
+					if(request.state == State.sslConnectPendingWrite)
+					if(writeSet.isSet(sock)) {
+						sslProceed(request, cast(SslClientSocket) sock);
+						continue;
+					}
+
 					if(request.state == State.sendingHeaders || request.state == State.sendingBody)
 					if(writeSet.isSet(sock)) {
 						request.timeoutFromInactivity = MonoTime.currTime + request.requestParameters.timeoutFromInactivity;
@@ -1739,6 +1947,9 @@ class HttpRequest {
 						auto sent = sock.send(request.sendBuffer);
 						debug(arsd_http2_verbose) writeln(cast(void*) sock, "<send>", cast(string) request.sendBuffer, "</send>");
 						if(sent <= 0) {
+							if(wouldHaveBlocked())
+								continue;
+
 							request.state = State.aborted;
 
 							request.responseData.code = 3;
@@ -1764,6 +1975,8 @@ class HttpRequest {
 						auto got = sock.receive(buffer);
 						debug(arsd_http2_verbose) { if(got < 0) writeln(lastSocketError); else writeln("====PACKET ",got,"=====",cast(string)buffer[0 .. got],"===/PACKET==="); }
 						if(got < 0) {
+							if(wouldHaveBlocked())
+								continue;
 							debug(arsd_http2) writeln("receive error");
 							if(request.state != State.complete) {
 								request.state = State.aborted;
@@ -1974,28 +2187,40 @@ class HttpRequest {
 
 				if(headerReadingState.atStartOfLine) {
 					headerReadingState.atStartOfLine = false;
+					// FIXME it being \r should never happen... and i don't think it does
 					if(data[position] == '\r' || data[position] == '\n') {
 						// done with headers
-						if(data[position] == '\r' && (position + 1) < data.length && data[position + 1] == '\n')
-							position++;
-						if(responseData.headers.length && responseData.headers[0].indexOf(" 100 ") != -1) {
-							// HTTP/1.1 100 Continue
-							// here we just discard the continue message and carry on; it is just informational anyway
-							// it arguably should be smarter though
-							responseData.headers = null;
-							headerReadingState.atStartOfLine = true;
 
-							continue;
-						} else {
-							if(this.requestParameters.method == HttpVerb.HEAD)
-								state = State.complete;
-							else
-								state = State.readingBody;
-						}
-						position++; // skip the newline
+						position++; // skip the \r
 
 						if(responseData.headers.length)
 							parseLastHeader();
+
+						if(responseData.code >= 100 && responseData.code < 200) {
+							// "100 Continue" - we should continue uploading request data at this point
+							// "101 Switching Protocols" - websocket, not expected here...
+							// "102 Processing" - server still working, keep the connection alive
+							// "103 Early Hints" - can have useful Link headers etc
+							//
+							// and other unrecognized ones can just safely be skipped
+
+							// FIXME: the headers shouldn't actually be reset; 103 Early Hints
+							// can give useful headers we want to keep
+
+							responseData.headers = null;
+							headerReadingState.atStartOfLine = true;
+
+							continue; // the \n will be skipped by the for loop advance
+						}
+
+						if(this.requestParameters.method == HttpVerb.HEAD)
+							state = State.complete;
+						else
+							state = State.readingBody;
+
+						// skip the \n before we break
+						position++;
+
 						break;
 					} else if(data[position] == ' ' || data[position] == '\t') {
 						// line continuation, ignore all whitespace and collapse it into a space
@@ -2181,6 +2406,7 @@ class HttpRequest {
 				}
 				if(bodyReadingState.contentLengthRemaining == 0) {
 					if(bodyReadingState.isGzipped || bodyReadingState.isDeflated) {
+						// import std.stdio; writeln(responseData.content.length, " ", responseData.content[0 .. 2], " .. ", responseData.content[$-2 .. $]);
 						auto n = uncompress.uncompress(responseData.content);
 						n ~= uncompress.flush();
 						responseData.content = cast(ubyte[]) n;
@@ -3271,6 +3497,9 @@ version(use_openssl) {
 
 	import core.stdc.config;
 
+	enum SSL_ERROR_WANT_READ = 2;
+	enum SSL_ERROR_WANT_WRITE = 3;
+
 	struct ossllib {
 		__gshared static extern(C) {
 			/* these are only on older openssl versions { */
@@ -3292,6 +3521,7 @@ version(use_openssl) {
 			void function(SSL_CTX*) SSL_CTX_free;
 
 			int function(const SSL*) SSL_pending;
+			int function (const SSL *ssl, int ret) SSL_get_error;
 
 			void function(SSL*, int, void*) SSL_set_verify;
 
@@ -3442,6 +3672,7 @@ version(use_openssl) {
 				];
 			} else {
 				static immutable string[] ossllibs = [
+					"libssl.so.3",
 					"libssl.so.1.1",
 					"libssl.so.1.0.2",
 					"libssl.so.1.0.1",
@@ -3461,6 +3692,8 @@ version(use_openssl) {
 			}
 
 			static immutable wstring[] ossllibs = [
+				"libssl-3-x64.dll"w,
+				"libssl-3.dll"w,
 				"libssl-1_1.dll"w,
 				"libssl32.dll"w,
 			];
@@ -3472,6 +3705,8 @@ version(use_openssl) {
 			}
 
 			static immutable wstring[] eaylibs = [
+				"libcrypto-3-x64.dll"w,
+				"libcrypto-3.dll"w,
 				"libcrypto-1_1.dll"w,
 				"libeay32.dll",
 			];
@@ -3647,12 +3882,21 @@ version(use_openssl) {
 		@trusted
 		override void connect(Address to) {
 			super.connect(to);
-			do_ssl_connect();
+			if(blocking) {
+				do_ssl_connect();
+			}
 		}
 
 		@trusted
-		void do_ssl_connect() {
+		// returns true if it is finished, false if it would have blocked, throws if there's an error
+		int do_ssl_connect() {
 			if(OpenSSL.SSL_connect(ssl) == -1) {
+
+				auto errCode = OpenSSL.SSL_get_error(ssl, -1);
+				if(errCode == SSL_ERROR_WANT_READ || errCode == SSL_ERROR_WANT_WRITE) {
+					return errCode;
+				}
+
 				string str;
 				OpenSSL.ERR_print_errors_cb(&collectSslErrors, &str);
 				int i;
@@ -3661,6 +3905,8 @@ version(use_openssl) {
 				//scanf("%d\n", i);
 				throw new Exception("Secure connect failed: " ~ getOpenSslErrorCode(err));
 			}
+
+			return 0;
 		}
 		
 		@trusted
@@ -3668,12 +3914,19 @@ version(use_openssl) {
 		//import std.stdio;writeln(cast(string) buf);
 			debug(arsd_http2_verbose) writeln("ssl writing ", buf.length);
 			auto retval = OpenSSL.SSL_write(ssl, buf.ptr, cast(uint) buf.length);
+
+			// don't need to throw anymore since it is checked elsewhere
+			// code useful sometimes for debugging hence commenting instead of deleting
+			version(none)
 			if(retval == -1) {
+
 				string str;
 				OpenSSL.ERR_print_errors_cb(&collectSslErrors, &str);
 				int i;
+
 				//printf("wtf\n");
 				//scanf("%d\n", i);
+
 				throw new Exception("ssl send failed " ~ str);
 			}
 			return retval;
@@ -3688,14 +3941,20 @@ version(use_openssl) {
 			debug(arsd_http2_verbose) writeln("ssl_read before");
 			auto retval = OpenSSL.SSL_read(ssl, buf.ptr, cast(int)buf.length);
 			debug(arsd_http2_verbose) writeln("ssl_read after");
+
+			// don't need to throw anymore since it is checked elsewhere
+			// code useful sometimes for debugging hence commenting instead of deleting
+			version(none)
 			if(retval == -1) {
+
 				string str;
 				OpenSSL.ERR_print_errors_cb(&collectSslErrors, &str);
 				int i;
+
 				//printf("wtf\n");
 				//scanf("%d\n", i);
 
-				//throw new Exception("ssl receive failed " ~ str);
+				throw new Exception("ssl receive failed " ~ str);
 			}
 			return retval;
 		}
@@ -4422,6 +4681,7 @@ class WebSocket {
 		if(readyState == CONNECTING)
 			throw new Exception("WebSocket not connected when trying to send. Did you forget to call connect(); ?");
 			//connect();
+			//import std.stdio; writeln("LLSEND: ", d);
 		while(d.length) {
 			auto r = socket.send(d);
 			if(r < 0 && wouldHaveBlocked()) {
@@ -4439,6 +4699,7 @@ class WebSocket {
 	}
 
 	private void llclose() {
+		// import std.stdio; writeln("LLCLOSE");
 		socket.shutdown(SocketShutdown.SEND);
 	}
 
@@ -4576,6 +4837,7 @@ class WebSocket {
 			return; // it cool, we done
 		WebSocketFrame wss;
 		wss.fin = true;
+		wss.masked = this.isClient;
 		wss.opcode = WebSocketOpcode.close;
 		wss.data = cast(ubyte[]) reason.dup;
 		wss.send(&llsend);
@@ -4589,19 +4851,26 @@ class WebSocket {
 		Sends a ping message to the server. This is done automatically by the library if you set a non-zero [Config.pingFrequency], but you can also send extra pings explicitly as well with this function.
 	+/
 	/// Group: foundational
-	void ping() {
+	void ping(in ubyte[] data = null) {
 		WebSocketFrame wss;
 		wss.fin = true;
+		wss.masked = this.isClient;
 		wss.opcode = WebSocketOpcode.ping;
+		if(data !is null) wss.data = data.dup;
 		wss.send(&llsend);
 	}
 
-	// automatically handled....
-	void pong() {
+	/++
+		Sends a pong message to the server. This is normally done automatically in response to pings.
+	+/
+	/// Group: foundational
+	void pong(in ubyte[] data = null) {
 		WebSocketFrame wss;
 		wss.fin = true;
+		wss.masked = this.isClient;
 		wss.opcode = WebSocketOpcode.pong;
 		wss.send(&llsend);
+		if(data !is null) wss.data = data.dup;
 	}
 
 	/++
@@ -4688,7 +4957,6 @@ class WebSocket {
 
 	private WebSocketFrame processOnce() {
 		ubyte[] d = receiveBuffer[0 .. receiveBufferUsedLength];
-		//import std.stdio; writeln(d);
 		auto s = d;
 		// FIXME: handle continuation frames more efficiently. it should really just reuse the receive buffer.
 		WebSocketFrame m;
@@ -4737,6 +5005,8 @@ class WebSocket {
 					}
 				break;
 				case WebSocketOpcode.close:
+
+					//import std.stdio; writeln("closed ", cast(string) m.data);
 					readyState_ = CLOSED;
 					if(onclose)
 						onclose();
@@ -4744,9 +5014,11 @@ class WebSocket {
 					unregisterActiveSocket(this);
 				break;
 				case WebSocketOpcode.ping:
-					pong();
+					// import std.stdio; writeln("ping received ", m.data);
+					pong(m.data);
 				break;
 				case WebSocketOpcode.pong:
+					// import std.stdio; writeln("pong received ", m.data);
 					// just really references it is still alive, nbd.
 				break;
 				default: // ignore though i could and perhaps should throw too
@@ -4803,9 +5075,24 @@ class WebSocket {
 
 	static {
 		/++
+			Runs an event loop with all known websockets on this thread until all websockets
+			are closed or unregistered, or until you call [exitEventLoop], or set `*localLoopExited`
+			to false (please note it may take a few seconds until it checks that flag again; it may
+			not exit immediately).
 
+			History:
+				The `localLoopExited` parameter was added August 22, 2022 (dub v10.9)
+
+			See_Also:
+				[addToSimpledisplayEventLoop]
 		+/
-		void eventLoop() {
+		void eventLoop(shared(bool)* localLoopExited = null) {
+			import core.atomic;
+			atomicOp!"+="(numberOfEventLoops, 1);
+			scope(exit) {
+				if(atomicOp!"-="(numberOfEventLoops, 1) <= 0)
+					loopExited = false; // reset it so we can reenter
+			}
 
 			static SocketSet readSet;
 
@@ -4814,15 +5101,16 @@ class WebSocket {
 
 			loopExited = false;
 
-			outermost: while(!loopExited) {
+			outermost: while(!loopExited && (localLoopExited is null || (*localLoopExited == false))) {
 				readSet.reset();
 
-				Duration timeout = 10.seconds;
+				Duration timeout = 3.seconds;
 
 				auto now = MonoTime.currTime;
 				bool hadAny;
 				foreach(sock; activeSockets) {
-					if(now >= sock.timeoutFromInactivity) {
+					auto diff = sock.timeoutFromInactivity - now;
+					if(diff <= 0.msecs) {
 						// timeout
 						if(sock.onerror)
 							sock.onerror();
@@ -4833,23 +5121,31 @@ class WebSocket {
 						continue outermost;
 					}
 
-					if(now >= sock.nextPing) {
+					if(diff < timeout)
+						timeout = diff;
+
+					diff = sock.nextPing - now;
+
+					if(diff <= 0.msecs) {
+						//sock.send(`{"action": "ping"}`);
 						sock.ping();
 						sock.nextPing = now + sock.config.pingFrequency.msecs;
+					} else {
+						if(diff < timeout)
+							timeout = diff;
 					}
-
-					auto timeo = sock.timeoutFromInactivity - now;
-					if(timeo < timeout)
-						timeout = timeo;
 
 					readSet.add(sock.socket);
 					hadAny = true;
 				}
 
-				if(!hadAny)
+				if(!hadAny) {
+					// import std.stdio; writeln("had none");
 					return;
+				}
 
 				tryAgain:
+					// import std.stdio; writeln(timeout);
 				auto selectGot = Socket.select(readSet, null, null, timeout);
 				if(selectGot == 0) { /* timeout */
 					// timeout
@@ -4875,16 +5171,29 @@ class WebSocket {
 			}
 		}
 
+		private static shared(int) numberOfEventLoops;
+
 		private __gshared bool loopExited;
 		/++
-			Exits the running [WebSocket.eventLoop].  You can call this from a signal handler or another thread.
+			Exits all running [WebSocket.eventLoop]s next time they loop around. You can call this from a signal handler or another thread.
+
+			Please note they may not loop around to check the flag for several seconds. Any new event loops will exit immediately until
+			all current ones are closed. Once all event loops are exited, the flag is cleared and you can start the loop again.
+
+			This function is likely to be deprecated in the future due to its quirks and imprecise name.
 		+/
 		void exitEventLoop() {
 			loopExited = true;
 		}
 
 		WebSocket[] activeSockets;
+
 		void registerActiveSocket(WebSocket s) {
+			// ensure it isn't already there...
+			assert(s !is null);
+			foreach(i, a; activeSockets)
+				if(a is s)
+					return;
 			activeSockets ~= s;
 		}
 		void unregisterActiveSocket(WebSocket s) {
@@ -4898,12 +5207,16 @@ class WebSocket {
 	}
 }
 
+private template imported(string mod) {
+	mixin(`import imported = ` ~ mod ~ `;`);
+}
+
 /++
 	Warning: you should call this AFTER websocket.connect or else it might throw on connect because the function sets nonblocking mode and the connect function doesn't handle that well (it throws on the "would block" condition in that function. easier to just do that first)
 +/
 template addToSimpledisplayEventLoop() {
 	import arsd.simpledisplay;
-	void addToSimpledisplayEventLoop(WebSocket ws, SimpleWindow window) {
+	void addToSimpledisplayEventLoop(WebSocket ws, imported!"arsd.simpledisplay".SimpleWindow window) {
 
 		void midprocess() {
 			if(!ws.lowLevelReceive()) {
@@ -5114,7 +5427,8 @@ public {
 
 			//writeln("SENDING ", headerScratch[0 .. headerScratchPos], data);
 			llsend(headerScratch[0 .. headerScratchPos]);
-			llsend(data);
+			if(data.length)
+				llsend(data);
 		}
 
 		static WebSocketFrame read(ref ubyte[] d) {
