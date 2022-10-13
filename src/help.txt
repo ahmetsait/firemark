@@ -1,0 +1,28 @@
+Usage:
+    firemark [options] --profile path/to/profile-folder
+        Downloads missing Firefox bookmark icons.
+    
+    firemark [options] --extract https://example.com
+        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output.
+
+Options:
+    -p, --profile=PATH
+        Path to profile folder where 'favicons.sqlite' and 'places.sqlite' exists.
+    -e, --erase
+        Erase favicon table before proceeding.
+    -f, --force
+        Force downloading icons for all bookmarks instead of just missing ones.
+    -j, --jobs=N
+        Number of concurrent jobs. Use it to speed up downloading process if you have too many bookmarks.
+        Anything more than '-j 5' is not recommended since servers might block you out because of rate limiting.
+    -x, --extract=URL
+        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output and exit.
+        This also includes the root '/favicon.ico' for convenience.
+    -v, --verbose
+        Print diagnostic messages.
+    --version
+        Output version information and exit.
+    --help
+        Show this help information and exit.
+
+<https://github.com/ahmetsait/firemark>
