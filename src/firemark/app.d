@@ -50,33 +50,7 @@ import firemark.util;
 
 immutable string versionString = "Firemark v0.1.0";
 
-immutable string helpString = q"HELP
-Usage:
-    firemark [options] -f path/to/favicons.sqlite -p path/to/places.sqlite
-        Downloads missing Firefox bookmark icons into 'favicons.sqlite'.
-    
-    firemark [options] -x https://example.com
-        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output.
-
-Options:
-    -f, --favicons=FILE
-        Path to 'favicons.sqlite' file.
-    -p, --places=FILE
-        Path to 'places.sqlite' file.
-    -j, --jobs=N
-        Number of concurrent jobs. Use it to speed up downloading process if you have too many bookmarks.
-        Anything more than '-j 3' is not recommended since servers might block you out because of rate limiting.
-    -x, --extract=URL
-        Extract favicon URLs from web page with 'link[rel~=icon]' selector to standard output and exit.
-    -v, --verbose
-        Print diagnostic messages.
-    --version
-        Output version information and exit.
-    --help
-        Show this help information and exit.
-
-<https://github.com/ahmetsait/firemark>
-HELP";
+immutable string helpString = import("help.txt");
 
 __gshared ubyte interrupted = 0;
 
