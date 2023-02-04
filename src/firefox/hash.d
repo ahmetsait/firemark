@@ -10,19 +10,19 @@ import core.stdc.stdint;
 enum uint32_t goldenRatio = 0x9E3779B9U;
 
 // https://searchfox.org/mozilla-central/rev/7b9d23ece4835bf355e5195f30fef942d376a1c7/mfbt/HashFunctions.h#104-107
-uint32_t rotateLeft5(uint32_t value)
+uint32_t rotateLeft5(uint32_t value) pure
 {
 	return (value << 5) | (value >> 27);
 }
 
 // https://searchfox.org/mozilla-central/rev/7b9d23ece4835bf355e5195f30fef942d376a1c7/mfbt/HashFunctions.h#109-153
-uint32_t addToHash(uint32_t hash, uint32_t value)
+uint32_t addToHash(uint32_t hash, uint32_t value) pure
 {
 	return goldenRatio * (rotateLeft5(hash) ^ value);
 }
 
 // https://searchfox.org/mozilla-central/rev/7b9d23ece4835bf355e5195f30fef942d376a1c7/mfbt/HashFunctions.h#257-268
-uint32_t hashString(const(char)[] str)
+uint32_t hashString(const(char)[] str) pure
 {
 	uint32_t hash = 0;
 	
@@ -33,17 +33,17 @@ uint32_t hashString(const(char)[] str)
 }
 
 // https://searchfox.org/mozilla-central/rev/7b9d23ece4835bf355e5195f30fef942d376a1c7/toolkit/components/places/SQLFunctions.cpp#965-1003
-uint64_t hashURL(const(char)[] url)
+uint64_t hashURL(const(char)[] url) pure
 {
 	import std.string : indexOf;
 	
 	ptrdiff_t prefix = url.indexOf(':');
 	
-	return (uint64_t(hashString(url[0 .. prefix >= 0 ? prefix : 0]) & 0x0000FFFF) << 32) + hashString(url);
+	return (uint64_t(hashString(url[0 .. prefix < 0 ? 0 : prefix]) & 0x0000FFFF) << 32) + hashString(url);
 }
 
 // https://searchfox.org/mozilla-central/rev/7b9d23ece4835bf355e5195f30fef942d376a1c7/toolkit/components/places/SQLFunctions.cpp#835-875
-string fixupURL(string url)
+string fixupURL(string url) pure
 {
 	import std.string : startsWith;
 	
