@@ -7,15 +7,15 @@
 
 /++
 	This is version 2 of my http/1.1 client implementation.
-	
-	
+
+
 	It has no dependencies for basic operation, but does require OpenSSL
 	libraries (or compatible) to be support HTTPS. This dynamically loaded
 	on-demand (meaning it won't be loaded if you don't use it, but if you do
 	use it, the openssl dynamic libraries must be found in the system search path).
 
 	You can compile with `-version=without_openssl` to entirely disable ssl support.
-	
+
 	http2.d, despite its name, does NOT implement HTTP/2.0, but this
 	shouldn't matter for 99.9% of usage, since all servers will continue
 	to support HTTP/1.1 for a very long time.
@@ -24,8 +24,20 @@
 		Automatic `100 Continue` handling was added on September 28, 2021. It doesn't
 		set the Expect header, so it isn't supposed to happen, but plenty of web servers
 		don't follow the standard anyway.
+
+		A dependency on [arsd.core] was added on March 19, 2023 (dub v11.0). Previously,
+		module was stand-alone. You will have add the `core.d` file from the arsd repo
+		to your build now if you are managing the files and builds yourself.
+
+		The benefits of this dependency include some simplified implementation code which
+		makes it easier for me to add more api conveniences, better exceptions with more
+		information, and better event loop integration with other arsd modules beyond
+		just the simpledisplay adapters available previously. The new integration can
+		also make things like heartbeat timers easier for you to code.
 +/
 module arsd.http2;
+
+static import arsd.core;
 
 ///
 unittest {
@@ -357,7 +369,7 @@ struct HttpResponse {
 						cookie.attributes[remaining.idup_if_needed] = "";
 						remaining = remaining[$..$];
 
-					} 
+					}
 				}
 
 				ret ~= cookie;
@@ -579,7 +591,9 @@ private class UnixAddress : Address {
 
 
 // Copy pasta from cgi.d, then stripped down. unix path thing added tho
-///
+/++
+	Represents a URI. It offers named access to the components and relative uri resolution, though as a user of the library, you'd mostly just construct it like `Uri("http://example.com/index.html")`.
++/
 struct Uri {
 	alias toString this; // blargh idk a url really is a string, but should it be implicit?
 
@@ -776,7 +790,7 @@ struct Uri {
 
 		path_loop:
 		auto path_start = idx;
-		
+
 		foreach(char c; uri[idx .. $]) {
 			if(c == '?' || c == '#')
 				break;
@@ -881,6 +895,9 @@ struct Uri {
 		return n;
 	}
 
+	/++
+		Resolves ../ and ./ parts of the path. Used in the implementation of [basedOn] and you could also use it to normalize things.
+	+/
 	void removeDots() {
 		auto parts = this.path.split("/");
 		string[] toKeep;
@@ -1004,7 +1021,7 @@ class HttpRequest {
 		setMaximumNumberOfRedirects();
 	}
 
-	
+
 	/// ditto
 	this(Uri where, HttpVerb method, ICache cache = null, Duration timeout = 10.seconds, string proxy = null) {
 		this(null, where, method, cache, timeout, proxy);
@@ -1496,6 +1513,8 @@ class HttpRequest {
 					socket.blocking = false;
 				}
 
+				socket.setOption(SocketOptionLevel.TCP, SocketOption.TCP_NODELAY, 1);
+
 				// FIXME: connect timeout?
 				if(unixSocketPath) {
 					import std.stdio; writeln(cast(ubyte[]) unixSocketPath);
@@ -1904,7 +1923,8 @@ class HttpRequest {
 					// is liable to block forever hogging the connection and not letting it send...
 					if(request.state == State.connecting)
 					if(writeSet.isSet(sock) || readSet.isSet(sock)) {
-						int error;
+						import core.stdc.stdint;
+						int32_t error;
 						int retopt = sock.getOption(SocketOptionLevel.SOCKET, SocketOption.ERROR, error);
 						if(retopt < 0 || error != 0) {
 							request.state = State.aborted;
@@ -2244,7 +2264,7 @@ class HttpRequest {
 					headerReadingState.justSawLf = true;
 					headerReadingState.atStartOfLine = true;
 					continue;
-				} else 
+				} else
 					headerReadingState.justSawLf = false;
 
 				responseData.headers[$-1] ~= data[position];
@@ -2963,7 +2983,7 @@ class HttpClient {
 		Returns true if the given no_proxy rule matches the uri.
 
 		Invalid IP ranges are silently ignored and return false.
-	
+
 		See $(LREF proxyIgnore).
 	+/
 	static bool matchProxyIgnore(scope const(char)[] rule, scope const Uri uri) nothrow {
@@ -3257,7 +3277,7 @@ class HttpCache : ICache {
 		return null;
 	}
 }
- 
+
 // / Gives simple maximum age caching, ignoring the actual http headers
 class SimpleCache : ICache {
 	const(HttpResponse)* getCachedResponse(HttpRequestParameters request) {
@@ -3908,7 +3928,7 @@ version(use_openssl) {
 
 			return 0;
 		}
-		
+
 		@trusted
 		override ptrdiff_t send(scope const(void)[] buf, SocketFlags flags) {
 		//import std.stdio;writeln(cast(string) buf);
@@ -3963,11 +3983,12 @@ version(use_openssl) {
 		}
 
 		this(AddressFamily af, SocketType type = SocketType.STREAM, string hostname = null, bool verifyPeer = true) {
+			version(Windows) __traits(getMember, this, "_blocking") = true; // lol longstanding phobos bug setting this to false on init
 			super(af, type);
 			initSsl(verifyPeer, hostname);
 		}
 
-		override void close() {
+		override void close() scope {
 			if(ssl) OpenSSL.SSL_shutdown(ssl);
 			super.close();
 		}
@@ -4412,7 +4433,7 @@ private bool bicmp(in ubyte[] item, in char[] search) {
 				}
 			}
 			---
-			
+
 +/
 class WebSocket {
 	private Uri uri;
@@ -4454,6 +4475,7 @@ class WebSocket {
 		} else
 			socket = new Socket(family(uri.unixSocketPath), SocketType.STREAM);
 
+		socket.setOption(SocketOptionLevel.TCP, SocketOption.TCP_NODELAY, 1);
 	}
 
 	/++
@@ -4462,11 +4484,52 @@ class WebSocket {
 	/// Group: foundational
 	void connect() {
 		this.isClient = true;
+
+		socket.blocking = false;
+
 		if(uri.unixSocketPath)
 			socket.connect(new UnixAddress(uri.unixSocketPath));
 		else
 			socket.connect(new InternetAddress(host, port)); // FIXME: ipv6 support...
-		// FIXME: websocket handshake could and really should be async too.
+
+
+		auto readSet = new SocketSet();
+		auto writeSet = new SocketSet();
+
+		readSet.reset();
+		writeSet.reset();
+
+		readSet.add(socket);
+		writeSet.add(socket);
+
+		auto selectGot = Socket.select(readSet, writeSet, null, config.timeoutFromInactivity);
+		if(selectGot == -1) {
+			// interrupted
+
+			throw new Exception("Websocket connection interrupted - retry might succeed");
+		} else if(selectGot == 0) {
+			// time out
+			socket.close();
+			throw new Exception("Websocket connection timed out");
+		} else {
+			if(writeSet.isSet(socket) || readSet.isSet(socket)) {
+				import core.stdc.stdint;
+				int32_t error;
+				int retopt = socket.getOption(SocketOptionLevel.SOCKET, SocketOption.ERROR, error);
+				if(retopt < 0 || error != 0) {
+					socket.close();
+					throw new Exception("Websocket connection failed - " ~ formatSocketError(error));
+				} else {
+					// FIXME: websocket handshake could and really should be async too.
+					socket.blocking = true; // just convenience
+					if(auto s = cast(SslClientSocket) socket) {
+						s.do_ssl_connect();
+					} else {
+						// we're ready
+					}
+				}
+			}
+		}
 
 		auto uri = this.uri.path.length ? this.uri.path : "/";
 		if(this.uri.query.length) {
@@ -4659,6 +4722,8 @@ class WebSocket {
 			}
 		}
 
+		readSet.reset();
+
 		readSet.add(socket);
 
 		//tryAgain:
@@ -4793,7 +4858,13 @@ class WebSocket {
 		+/
 		string[] additionalHeaders;
 
-		int pingFrequency = 5000; /// Amount of time (in msecs) of idleness after which to send an automatic ping
+		/++
+			Amount of time (in msecs) of idleness after which to send an automatic ping
+
+			Please note how this interacts with [timeoutFromInactivity] - a ping counts as activity that
+			keeps the socket alive.
+		+/
+		int pingFrequency = 5000;
 
 		/++
 			Amount of time to disconnect when there's no activity. Note that automatic pings will keep the connection alive; this timeout only occurs if there's absolutely nothing, including no responses to websocket ping frames. Since the default [pingFrequency] is only seconds, this one minute should never elapse unless the connection is actually dead.
@@ -4827,9 +4898,15 @@ class WebSocket {
 
 	/++
 		Closes the connection, sending a graceful teardown message to the other side.
+
+		Code 1000 is the normal closure code.
+
+		History:
+			The default `code` was changed to 1000 on January 9, 2023. Previously it was 0,
+			but also ignored anyway.
 	+/
 	/// Group: foundational
-	void close(int code = 0, string reason = null)
+	void close(int code = 1000, string reason = null)
 		//in (reason.length < 123)
 		in { assert(reason.length < 123); } do
 	{
@@ -4839,13 +4916,17 @@ class WebSocket {
 		wss.fin = true;
 		wss.masked = this.isClient;
 		wss.opcode = WebSocketOpcode.close;
-		wss.data = cast(ubyte[]) reason.dup;
+		wss.data = [ubyte((code >> 8) & 0xff), ubyte(code & 0xff)] ~ cast(ubyte[]) reason.dup;
 		wss.send(&llsend);
 
 		readyState_ = CLOSING;
 
+		closeCalled = true;
+
 		llclose();
 	}
+
+	private bool closeCalled;
 
 	/++
 		Sends a ping message to the server. This is done automatically by the library if you set a non-zero [Config.pingFrequency], but you can also send extra pings explicitly as well with this function.
@@ -4869,8 +4950,8 @@ class WebSocket {
 		wss.fin = true;
 		wss.masked = this.isClient;
 		wss.opcode = WebSocketOpcode.pong;
-		wss.send(&llsend);
 		if(data !is null) wss.data = data.dup;
+		wss.send(&llsend);
 	}
 
 	/++
@@ -5007,9 +5088,23 @@ class WebSocket {
 				case WebSocketOpcode.close:
 
 					//import std.stdio; writeln("closed ", cast(string) m.data);
-					readyState_ = CLOSED;
+
+					ushort code = CloseEvent.StandardCloseCodes.noStatusCodePresent;
+					const(char)[] reason;
+
+					if(m.data.length >= 2) {
+						code = (m.data[0] << 8) | m.data[1];
+						reason = (cast(char[]) m.data[2 .. $]);
+					}
+
 					if(onclose)
-						onclose();
+						onclose(CloseEvent(code, reason, true));
+
+					// if we receive one and haven't sent one back we're supposed to echo it back and close.
+					if(!closeCalled)
+						close(code, reason.idup);
+
+					readyState_ = CLOSED;
 
 					unregisterActiveSocket(this);
 				break;
@@ -5043,8 +5138,52 @@ class WebSocket {
 		} while(lowLevelReceive());
 	}
 
+	/++
+		Arguments for the close event. The `code` and `reason` are provided from the close message on the websocket, if they are present. The spec says code 1000 indicates a normal, default reason close, but reserves the code range from 3000-5000 for future definition; the 3000s can be registered with IANA and the 4000's are application private use. The `reason` should be user readable, but not displayed to the end user. `wasClean` is true if the server actually sent a close event, false if it just disconnected.
 
-	void delegate() onclose; ///
+		$(PITFALL
+			The `reason` argument references a temporary buffer and there's no guarantee it will remain valid once your callback returns. It may be freed and will very likely be overwritten. If you want to keep the reason beyond the callback, make sure you `.idup` it.
+		)
+
+		History:
+			Added March 19, 2023 (dub v11.0).
+	+/
+	static struct CloseEvent {
+		ushort code;
+		const(char)[] reason;
+		bool wasClean;
+
+		string extendedErrorInformationUnstable;
+
+		/++
+			See https://www.rfc-editor.org/rfc/rfc6455#section-7.4.1 for details.
+		+/
+		enum StandardCloseCodes {
+			purposeFulfilled = 1000,
+			goingAway = 1001,
+			protocolError = 1002,
+			unacceptableData = 1003, // e.g. got text message when you can only handle binary
+			Reserved = 1004,
+			noStatusCodePresent = 1005, // not set by endpoint.
+			abnormalClosure = 1006, // not set by endpoint. closed without a Close control. FIXME: maybe keep a copy of errno around for these
+			inconsistentData = 1007, // e.g. utf8 validation failed
+			genericPolicyViolation = 1008,
+			messageTooBig = 1009,
+			clientRequiredExtensionMissing = 1010, // only the client should send this
+			unnexpectedCondition = 1011,
+			unverifiedCertificate = 1015, // not set by client
+		}
+	}
+
+	/++
+		The `CloseEvent` you get references a temporary buffer that may be overwritten after your handler returns. If you want to keep it or the `event.reason` member, remember to `.idup` it.
+
+		History:
+			The `CloseEvent` was changed to a [arsd.core.FlexibleDelegate] on March 19, 2023 (dub v11.0). Before that, `onclose` was a public member of type `void delegate()`. This change means setters still work with or without the [CloseEvent] argument.
+
+			Your onclose method is now also called on abnormal terminations. Check the `wasClean` member of the `CloseEvent` to know if it came from a close frame or other cause.
+	+/
+	arsd.core.FlexibleDelegate!(void delegate(CloseEvent event)) onclose;
 	void delegate() onerror; ///
 	void delegate(in char[]) ontextmessage; ///
 	void delegate(in ubyte[]) onbinarymessage; ///
@@ -5115,6 +5254,9 @@ class WebSocket {
 						if(sock.onerror)
 							sock.onerror();
 
+						if(sock.onclose)
+							sock.onclose(CloseEvent(CloseEvent.StandardCloseCodes.abnormalClosure, "Connection timed out", false, null));
+
 						sock.socket.close();
 						sock.readyState_ = CLOSED;
 						unregisterActiveSocket(sock);
@@ -5158,6 +5300,13 @@ class WebSocket {
 							sock.timeoutFromInactivity = MonoTime.currTime + sock.config.timeoutFromInactivity;
 							if(!sock.lowLevelReceive()) {
 								sock.readyState_ = CLOSED;
+
+								if(sock.onerror)
+									sock.onerror();
+
+								if(sock.onclose)
+									sock.onclose(CloseEvent(CloseEvent.StandardCloseCodes.abnormalClosure, "Connection lost", false, lastSocketError()));
+
 								unregisterActiveSocket(sock);
 								continue outermost;
 							}

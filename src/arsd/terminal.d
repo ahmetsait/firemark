@@ -11,12 +11,14 @@
 	The main interface for this module is the Terminal struct, which
 	encapsulates the output functions and line-buffered input of the terminal, and
 	RealTimeConsoleInput, which gives real time input.
-	
+
 	Creating an instance of these structs will perform console initialization. When the struct
 	goes out of scope, any changes in console settings will be automatically reverted and pending
-	output is flushed. Do not create a global Terminal, as this will skip the destructor. You should
-	create the object as a local, then pass borrowed pointers to it if needed somewhere else. This
-	ensures the construction and destruction is run in a timely manner.
+	output is flushed. Do not create a global Terminal, as this will skip the destructor. Also do
+	not create an instance inside a class or array, as again the destructor will be nondeterministic.
+	You should create the object as a local inside main (or wherever else will encapsulate its whole
+	usage lifetime), then pass borrowed pointers to it if needed somewhere else. This ensures the
+	construction and destruction is run in a timely manner.
 
 	$(PITFALL
 		Output is NOT flushed on \n! Output is buffered until:
@@ -155,6 +157,36 @@ unittest {
 	}
 
 	version(demos) main; // exclude from docs
+}
+
+/++
+	$(H3 Full screen)
+
+	This shows how to use the cellular (full screen) mode and pass terminal to functions.
++/
+unittest {
+	import arsd.terminal;
+
+	// passing terminals must be done by ref or by pointer
+	void helper(Terminal* terminal) {
+		terminal.moveTo(0, 1);
+		terminal.getline("Press enter to exit...");
+	}
+
+	void main() {
+		// ask for cellular mode, it will go full screen
+		auto terminal = Terminal(ConsoleOutputType.cellular);
+
+		// it is automatically cleared upon entry
+		terminal.write("Hello upper left corner");
+
+		// pass it by pointer to other functions
+		helper(&terminal);
+
+		// since at the end of main, Terminal's destructor
+		// resets the terminal to how it was before for the
+		// user
+	}
 }
 
 /*
@@ -1213,6 +1245,18 @@ struct Terminal {
 
 	version(TerminalDirectToEmulator)
 	/++
+		When using the embedded terminal emulator build, closing the terminal signals that the main thread should exit
+		by sending it a hang up event. If the main thread responds, no problem. But if it doesn't, it can keep a thing
+		running in the background with no visible window. This timeout gives it a chance to exit cleanly, but if it
+		doesn't by the end of the time, the program will be forcibly closed automatically.
+
+		History:
+			Added March 14, 2023 (dub v10.10)
+	+/
+	static __gshared int terminateTimeoutMsecs = 3500;
+
+	version(TerminalDirectToEmulator)
+	/++
 	+/
 	this(ConsoleOutputType type) {
 		_initialized = true;
@@ -1226,6 +1270,7 @@ struct Terminal {
 
 		import arsd.simpledisplay;
 		static if(UsingSimpledisplayX11) {
+			if(!integratedTerminalEmulatorConfiguration.preferDegradedTerminal)
 			try {
 				if(arsd.simpledisplay.librariesSuccessfullyLoaded) {
 					XDisplayConnection.get();
@@ -1273,6 +1318,18 @@ struct Terminal {
 					});
 					tew = window.tew;
 					window.loop();
+
+					// if the other thread doesn't terminate in a reasonable amount of time
+					// after the window closes, we're gonna terminate it by force to avoid
+					// leaving behind a background process with no obvious ui
+					if(Terminal.terminateTimeoutMsecs >= 0) {
+						auto murderThread = new Thread(() {
+							Thread.sleep(terminateTimeoutMsecs.msecs);
+							terminateTerminalProcess(threadId);
+						});
+						murderThread.isDaemon = true;
+						murderThread.start();
+					}
 				} catch(Throwable t) {
 					guiAbortProcess(t.toString());
 				}
@@ -1709,6 +1766,8 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 	}
 
 	private bool _underlined = false;
+	private bool _bolded = false;
+	private bool _italics = false;
 
 	/++
 		Outputs a hyperlink to my custom terminal (v0.0.7 or later) or to version
@@ -1779,7 +1838,7 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 				color(fg, bg);
 			}
 		} else {
-			write(text); // graceful degrade  
+			write(text); // graceful degrade
 		}
 	}
 
@@ -1798,7 +1857,19 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		}
 	}
 
-	/// Note: the Windows console does not support underlining
+	/++
+		Sets or resets the terminal's text rendering options.
+
+		Note: the Windows console does not support these and many Unix terminals don't either.
+		Many will treat italic as blink and bold as brighter color. There is no way to know
+		what will happen. So I don't recommend you use these in general. They don't even work
+		with `-version=TerminalDirectToEmulator`.
+
+		History:
+			underline was added in March 2020. italic and bold were added November 1, 2022
+
+			since they are unreliable, i didnt want to add these but did for some special requests.
+	+/
 	void underline(bool set, ForceOption force = ForceOption.automatic) {
 		if(set == _underlined && force != ForceOption.alwaysSend)
 			return;
@@ -1810,7 +1881,42 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		}
 		_underlined = set;
 	}
-	// FIXME: do I want to do bold and italic?
+	/// ditto
+	void italic(bool set, ForceOption force = ForceOption.automatic) {
+		if(set == _italics && force != ForceOption.alwaysSend)
+			return;
+		if(UseVtSequences) {
+			if(set)
+				writeStringRaw("\033[3m");
+			else
+				writeStringRaw("\033[23m");
+		}
+		_italics = set;
+	}
+	/// ditto
+	void bold(bool set, ForceOption force = ForceOption.automatic) {
+		if(set == _bolded && force != ForceOption.alwaysSend)
+			return;
+		if(UseVtSequences) {
+			if(set)
+				writeStringRaw("\033[1m");
+			else
+				writeStringRaw("\033[22m");
+		}
+		_bolded = set;
+	}
+
+	// FIXME: implement this in arsd terminalemulator too
+	// and make my vim use it. these are extensions in the iterm, etc
+	/+
+	void setUnderlineColor(Color colorIndex) {} // 58;5;n
+	void setUnderlineColor(int r, int g, int b) {} // 58;2;r;g;b
+	void setDefaultUnderlineColor() {} // 59
+	+/
+
+
+
+
 
 	/// Returns the terminal to normal output colors
 	void reset() {
@@ -1822,6 +1928,8 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 			writeStringRaw("\033[0m");
 
 		_underlined = false;
+		_italics = false;
+		_bolded = false;
 		_currentForeground = Color.DEFAULT;
 		_currentBackground = Color.DEFAULT;
 		reverseVideo = false;
@@ -1829,12 +1937,17 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 
 	// FIXME: add moveRelative
 
-	/// The current x position of the output cursor. 0 == leftmost column
+	/++
+		The current cached x and y positions of the output cursor. 0 == leftmost column for x and topmost row for y.
+
+		Please note that the cached position is not necessarily accurate. You may consider calling [updateCursorPosition]
+		first to ask the terminal for its authoritative answer.
+	+/
 	@property int cursorX() {
 		return _cursorX;
 	}
 
-	/// The current y position of the output cursor. 0 == topmost row
+	/// ditto
 	@property int cursorY() {
 		return _cursorY;
 	}
@@ -2028,9 +2141,9 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		version(Windows) {
 			CONSOLE_SCREEN_BUFFER_INFO info;
 			GetConsoleScreenBufferInfo( hConsole, &info );
-        
+
 			int cols, rows;
-        
+
 			cols = (info.srWindow.Right - info.srWindow.Left + 1);
 			rows = (info.srWindow.Bottom - info.srWindow.Top + 1);
 
@@ -2101,10 +2214,13 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 	void writeln(T...)(T t) {
 		write(t, "\n");
 	}
-
+        import std.uni;
+        int[Grapheme] graphemeWidth;
+        bool willInsertFollowingLine = false;
+        bool uncertainIfAtEndOfLine = false;
 	/+
 	/// A combined moveTo and writef that puts the cursor back where it was before when it finishes the write.
-	/// Only works in cellular mode. 
+	/// Only works in cellular mode.
 	/// Might give better performance than moveTo/writef because if the data to write matches the internal buffer, it skips sending anything (to override the buffer check, you can use moveTo and writePrintableString with ForceOption.alwaysSend)
 	void writefAt(T...)(int x, int y, string f, T t) {
 		import std.string;
@@ -2123,51 +2239,93 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		writeStringRaw(toWrite, ForceOption.alwaysSend);
 	}
 	+/
+        void writePrintableString(const(char)[] s, ForceOption force = ForceOption.automatic) {
+                while(s.length > 0) {
+                        size_t index = 0;
+                        import std.utf;
+                        import std.uni;
+                        import std.range;
+                        bool written=false;
+                        loop:
+                        foreach(g; s.byDchar.byGrapheme) {
+                                index += g[].byChar.walkLength;
+                                if(uncertainIfAtEndOfLine) {
+                                        uncertainIfAtEndOfLine = false;
+                                        writePrintableString_(s[0..index],force);
+                                        written = true;
+                                        updateCursorPosition();
+                                        break;
+                                }
+                                if(willInsertFollowingLine) {
+                                        willInsertFollowingLine = false;
+                                        _cursorX = 0;
+                                        _cursorY++;
+                                        if(_cursorY >= height) { _cursorY--; }
+                                }
+                                switch(g[0]) {
+                                        case '\n':
+                                                _cursorX = 0;
+                                                _cursorY++;
+                                                break;
+                                        case '\r':
+                                                _cursorX = 0;
+                                                break;
+                                        case '\t':
+                                                // FIXME: get the actual tabstop, if possible
+                                                int diff = 8 - (_cursorX % 8);
+                                                if(diff == 0)
+                                                        diff = 8;
+                                                _cursorX += diff;
+                                                break;
+                                        default:
+                                                if(auto ptr = g in graphemeWidth) {
+                                                        _cursorX += *ptr;
 
-	void writePrintableString(const(char)[] s, ForceOption force = ForceOption.automatic) {
+                                                        if(_wrapAround) {
+                                                                if(_cursorX == width) {
+                                                                        _cursorX--;
+                                                                        willInsertFollowingLine = true;
+                                                                }
+                                                                else if(cursorX > width) {
+                                                                        _cursorX = *ptr;
+                                                                        _cursorY++;
+                                                                        if(_cursorY == height)
+                                                                                _cursorY--;
+                                                                }
+                                                        }
+
+                                                }
+                                                else {
+                                                        int x = _cursorX;
+                                                        int y = _cursorY;
+                                                        writePrintableString_(s[0..index],force);
+                                                        written = true;
+                                                        updateCursorPosition();
+                                                        //FIXME: At some point it might be worthwhile to check if the next wrtie will wrap on those terminals that support it
+                                                        //Note that: tmux (and screen?) seem to signal that the next write will wrap by reporting cursorX==width
+                                                        if (_cursorX+1< width || _cursorX == width)  {
+                                                                graphemeWidth[g] = _cursorY > y
+                                                                        ? _cursorX
+                                                                        : _cursorX - x;
+                                                                if(_cursorX == width) { willInsertFollowingLine = true; }
+                                                        }
+                                                        else { uncertainIfAtEndOfLine = true; }
+                                                        break loop;
+                                                }
+                                }
+                        }
+                        if(!written) { writePrintableString_(s[0..index],force); }
+                        s = s[index..$];
+                }
+        }
+
+	void writePrintableString_(const(char)[] s, ForceOption force = ForceOption.automatic) {
 		// an escape character is going to mess things up. Actually any non-printable character could, but meh
 		// assert(s.indexOf("\033") == -1);
 
 		if(s.length == 0)
 			return;
 
-		// tracking cursor position
-		// FIXME: by grapheme?
-		foreach(dchar ch; s) {
-			switch(ch) {
-				case '\n':
-					_cursorX = 0;
-					_cursorY++;
-				break;
-				case '\r':
-					_cursorX = 0;
-				break;
-				case '\t':
-					// FIXME: get the actual tabstop, if possible
-					int diff = 8 - (_cursorX % 8);
-					if(diff == 0)
-						diff = 8;
-					_cursorX += diff;
-				break;
-				default:
-					_cursorX++;
-			}
-
-			if(_wrapAround && _cursorX > width) {
-				_cursorX = 0;
-				_cursorY++;
-			}
-
-			if(_cursorY == height)
-				_cursorY--;
-
-			/+
-			auto index = getIndex(_cursorX, _cursorY);
-			if(data[index] != ch) {
-				data[index] = ch;
-			}
-			+/
-		}
 
 		version(TerminalDirectToEmulator) {
 			// this breaks up extremely long output a little as an aid to the
@@ -2273,6 +2431,30 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		_cursorY = 0;
 	}
 
+        /++
+		Clears the current line from the cursor onwards.
+
+		History:
+			Added January 25, 2023 (dub v11.0)
+	+/
+        void clearToEndOfLine() {
+                if(UseVtSequences) {
+                        writeStringRaw("\033[0K");
+                }
+                else version(Windows) {
+                        updateCursorPosition();
+                        auto x = _cursorX;
+                        auto y = _cursorY;
+                        DWORD c;
+                        CONSOLE_SCREEN_BUFFER_INFO csbi;
+                        DWORD conSize = width-x;
+                        GetConsoleScreenBufferInfo(hConsole, &csbi);
+                        auto coordScreen = COORD(cast(short) x, cast(short) y);
+                        FillConsoleOutputCharacterA(hConsole, ' ', conSize, coordScreen, &c);
+                        FillConsoleOutputAttribute(hConsole, csbi.wAttributes, conSize, coordScreen, &c);
+                        moveTo(x, y, ForceOption.alwaysSend);
+                }
+        }
 	/++
 		Gets a line, including user editing. Convenience method around the [LineGetter] class and [RealTimeConsoleInput] facilities - use them if you need more control.
 
@@ -2293,6 +2475,7 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		Params:
 			prompt = the prompt to give the user. For example, `"Your name: "`.
 			echoChar = the character to show back to the user as they type. The default value of `dchar.init` shows the user their own input back normally. Passing `0` here will disable echo entirely, like a Unix password prompt. Or you might also try `'*'` to do a password prompt that shows the number of characters input to the user.
+			prefilledData = the initial data to populate the edit buffer
 
 		History:
 			The `echoChar` parameter was added on October 11, 2021 (dub v10.4).
@@ -2300,8 +2483,10 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 			The `prompt` would not take effect if it was `null` prior to November 12, 2021. Before then, a `null` prompt would just leave the previous prompt string in place on the object. After that, the prompt is always set to the argument, including turning it off if you pass `null` (which is the default).
 
 			Always pass a string if you want it to display a string.
+
+			The `prefilledData` (and overload with it as second param) was added on January 1, 2023 (dub v10.10 / v11.0).
 	+/
-	string getline(string prompt = null, dchar echoChar = dchar.init) {
+	string getline(string prompt = null, dchar echoChar = dchar.init, string prefilledData = null) {
 		if(lineGetter is null)
 			lineGetter = new LineGetter(&this);
 		// since the struct might move (it shouldn't, this should be unmovable!) but since
@@ -2318,6 +2503,10 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 
 
 		lineGetter.prompt = prompt;
+		if(prefilledData) {
+			lineGetter.addString(prefilledData);
+			lineGetter.maintainBuffer = true;
+		}
 
 		auto input = RealTimeConsoleInput(&this, ConsoleInputFlags.raw | ConsoleInputFlags.selectiveMouse | ConsoleInputFlags.paste | ConsoleInputFlags.size | ConsoleInputFlags.noEolWrap);
 		auto line = lineGetter.getline(&input);
@@ -2332,6 +2521,158 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		return line;
 	}
 
+	/// ditto
+	string getline(string prompt, string prefilledData, dchar echoChar = dchar.init) {
+		return getline(prompt, echoChar, prefilledData);
+	}
+
+
+	/++
+		Forces [cursorX] and [cursorY] to resync from the terminal.
+
+		History:
+			Added January 8, 2023
+	+/
+	void updateCursorPosition() {
+		auto terminal = &this;
+
+		terminal.flush();
+
+		// then get the current cursor position to start fresh
+		version(TerminalDirectToEmulator) {
+			if(!terminal.usingDirectEmulator)
+				return updateCursorPosition_impl();
+
+			if(terminal.pipeThroughStdOut) {
+				terminal.tew.terminalEmulator.waitingForInboundSync = true;
+				terminal.writeStringRaw("\xff");
+				terminal.flush();
+				if(windowGone) forceTermination();
+				terminal.tew.terminalEmulator.syncSignal.wait();
+			}
+
+			terminal._cursorX = terminal.tew.terminalEmulator.cursorX;
+			terminal._cursorY = terminal.tew.terminalEmulator.cursorY;
+		} else
+			updateCursorPosition_impl();
+               if(_cursorX == width) {
+                       willInsertFollowingLine = true;
+                       _cursorX--;
+               }
+	}
+	private void updateCursorPosition_impl() {
+		auto terminal = &this;
+		version(Win32Console) {
+			CONSOLE_SCREEN_BUFFER_INFO info;
+			GetConsoleScreenBufferInfo(terminal.hConsole, &info);
+			_cursorX = info.dwCursorPosition.X;
+			_cursorY = info.dwCursorPosition.Y;
+		} else version(Posix) {
+			// request current cursor position
+
+			// we have to turn off cooked mode to get this answer, otherwise it will all
+			// be messed up. (I hate unix terminals, the Windows way is so much easer.)
+
+			// We also can't use RealTimeConsoleInput here because it also does event loop stuff
+			// which would be broken by the child destructor :( (maybe that should be a FIXME)
+
+			/+
+			if(rtci !is null) {
+				while(rtci.timedCheckForInput_bypassingBuffer(1000))
+					rtci.inputQueue ~= rtci.readNextEvents();
+			}
+			+/
+
+			ubyte[128] hack2;
+			termios old;
+			ubyte[128] hack;
+			tcgetattr(terminal.fdIn, &old);
+			auto n = old;
+			n.c_lflag &= ~(ICANON | ECHO);
+			tcsetattr(terminal.fdIn, TCSANOW, &n);
+			scope(exit)
+				tcsetattr(terminal.fdIn, TCSANOW, &old);
+
+
+			terminal.writeStringRaw("\033[6n");
+			terminal.flush();
+
+			import std.conv;
+			import core.stdc.errno;
+
+			import core.sys.posix.unistd;
+
+			ubyte readOne() {
+				ubyte[1] buffer;
+				int tries = 0;
+				try_again:
+				if(tries > 30)
+					throw new Exception("terminal reply timed out");
+				auto len = read(terminal.fdIn, buffer.ptr, buffer.length);
+				if(len == -1) {
+					if(errno == EINTR)
+						goto try_again;
+					if(errno == EAGAIN || errno == EWOULDBLOCK) {
+						import core.thread;
+						Thread.sleep(10.msecs);
+						tries++;
+						goto try_again;
+					}
+				} else if(len == 0) {
+					throw new Exception("Couldn't get cursor position to initialize get line " ~ to!string(len) ~ " " ~ to!string(errno));
+				}
+
+				return buffer[0];
+			}
+
+			nextEscape:
+			while(readOne() != '\033') {}
+			if(readOne() != '[')
+				goto nextEscape;
+
+			int x, y;
+
+			// now we should have some numbers being like yyy;xxxR
+			// but there may be a ? in there too; DEC private mode format
+			// of the very same data.
+
+			x = 0;
+			y = 0;
+
+			auto b = readOne();
+
+			if(b == '?')
+				b = readOne(); // no big deal, just ignore and continue
+
+			nextNumberY:
+			if(b >= '0' && b <= '9') {
+				y *= 10;
+				y += b - '0';
+			} else goto nextEscape;
+
+			b = readOne();
+			if(b != ';')
+				goto nextNumberY;
+
+			b = readOne();
+			nextNumberX:
+			if(b >= '0' && b <= '9') {
+				x *= 10;
+				x += b - '0';
+			} else goto nextEscape;
+
+			b = readOne();
+			// another digit
+			if(b >= '0' && b <= '9')
+				goto nextNumberX;
+
+			if(b != 'R')
+				goto nextEscape; // it wasn't the right thing it after all
+
+			_cursorX = x - 1;
+			_cursorY = y - 1;
+		}
+	}
 }
 
 /++
@@ -4250,7 +4591,7 @@ struct InputEvent {
 
 		The event types:
 			[KeyboardEvent], [MouseEvent], [SizeChangedEvent],
-			[PasteEvent], [UserInterruptionEvent], 
+			[PasteEvent], [UserInterruptionEvent],
 			[EndOfFileEvent], [HangupEvent], [CustomEvent]
 
 		And associated functions:
@@ -4596,7 +4937,10 @@ private uint /* TerminalCapabilities bitmask */ getTerminalCapabilities(int fdIn
 
 	auto got = buffer[0 .. len];
 	if(!hasAnswer(got)) {
-		goto try_again;
+		if(retries > 0)
+			goto try_again;
+		else
+			return TerminalCapabilities.minimal;
 	}
 	auto gots = cast(char[]) answer[3 .. $-1];
 
@@ -5923,6 +6267,8 @@ class LineGetter {
 			return;
 
 		if(!multiLineMode) {
+			terminal.clearToEndOfLine();
+			/*
 			if(UseVtSequences && !_drawWidthMax) {
 				terminal.writeStringRaw("\033[K");
 			} else {
@@ -5932,6 +6278,7 @@ class LineGetter {
 					terminal.write(" ");
 				lastDrawLength = cdi.written;
 			}
+			*/
 			// if echoChar is null then we don't want to reflect the position at all
 			terminal.moveTo(startOfLineX + ((echoChar == 0) ? 0 : cdi.cursorPositionToDrawX) + promptLength, startOfLineY + cdi.cursorPositionToDrawY);
 		} else {
@@ -6147,141 +6494,10 @@ class LineGetter {
 	}
 
 	protected void updateCursorPosition() {
-		terminal.flush();
+		terminal.updateCursorPosition();
 
-		// then get the current cursor position to start fresh
-		version(TerminalDirectToEmulator) {
-			if(!terminal.usingDirectEmulator)
-				return updateCursorPosition_impl();
-
-			if(terminal.pipeThroughStdOut) {
-				terminal.tew.terminalEmulator.waitingForInboundSync = true;
-				terminal.writeStringRaw("\xff");
-				terminal.flush();
-				if(windowGone) forceTermination();
-				terminal.tew.terminalEmulator.syncSignal.wait();
-			}
-
-			startOfLineX = terminal.tew.terminalEmulator.cursorX;
-			startOfLineY = terminal.tew.terminalEmulator.cursorY;
-		} else
-			updateCursorPosition_impl();
-	}
-	private void updateCursorPosition_impl() {
-		version(Win32Console) {
-			CONSOLE_SCREEN_BUFFER_INFO info;
-			GetConsoleScreenBufferInfo(terminal.hConsole, &info);
-			startOfLineX = info.dwCursorPosition.X;
-			startOfLineY = info.dwCursorPosition.Y;
-		} else version(Posix) {
-			// request current cursor position
-
-			// we have to turn off cooked mode to get this answer, otherwise it will all
-			// be messed up. (I hate unix terminals, the Windows way is so much easer.)
-
-			// We also can't use RealTimeConsoleInput here because it also does event loop stuff
-			// which would be broken by the child destructor :( (maybe that should be a FIXME)
-
-			/+
-			if(rtci !is null) {
-				while(rtci.timedCheckForInput_bypassingBuffer(1000))
-					rtci.inputQueue ~= rtci.readNextEvents();
-			}
-			+/
-
-			ubyte[128] hack2;
-			termios old;
-			ubyte[128] hack;
-			tcgetattr(terminal.fdIn, &old);
-			auto n = old;
-			n.c_lflag &= ~(ICANON | ECHO);
-			tcsetattr(terminal.fdIn, TCSANOW, &n);
-			scope(exit)
-				tcsetattr(terminal.fdIn, TCSANOW, &old);
-
-
-			terminal.writeStringRaw("\033[6n");
-			terminal.flush();
-
-			import std.conv;
-			import core.stdc.errno;
-
-			import core.sys.posix.unistd;
-
-			ubyte readOne() {
-				ubyte[1] buffer;
-				int tries = 0;
-				try_again:
-				if(tries > 30)
-					throw new Exception("terminal reply timed out");
-				auto len = read(terminal.fdIn, buffer.ptr, buffer.length);
-				if(len == -1) {
-					if(errno == EINTR)
-						goto try_again;
-					if(errno == EAGAIN || errno == EWOULDBLOCK) {
-						import core.thread;
-						Thread.sleep(10.msecs);
-						tries++;
-						goto try_again;
-					}
-				} else if(len == 0) {
-					throw new Exception("Couldn't get cursor position to initialize get line " ~ to!string(len) ~ " " ~ to!string(errno));
-				}
-
-				return buffer[0];
-			}
-
-			nextEscape:
-			while(readOne() != '\033') {}
-			if(readOne() != '[')
-				goto nextEscape;
-
-			int x, y;
-
-			// now we should have some numbers being like yyy;xxxR
-			// but there may be a ? in there too; DEC private mode format
-			// of the very same data.
-
-			x = 0;
-			y = 0;
-
-			auto b = readOne();
-
-			if(b == '?')
-				b = readOne(); // no big deal, just ignore and continue
-
-			nextNumberY:
-			if(b >= '0' && b <= '9') {
-				y *= 10;
-				y += b - '0';
-			} else goto nextEscape;
-
-			b = readOne();
-			if(b != ';')
-				goto nextNumberY;
-
-			b = readOne();
-			nextNumberX:
-			if(b >= '0' && b <= '9') {
-				x *= 10;
-				x += b - '0';
-			} else goto nextEscape;
-
-			b = readOne();
-			// another digit
-			if(b >= '0' && b <= '9')
-				goto nextNumberX;
-
-			if(b != 'R')
-				goto nextEscape; // it wasn't the right thing it after all
-
-			startOfLineX = x - 1;
-			startOfLineY = y - 1;
-		}
-
-		// updating these too because I can with the more accurate info from above
-		terminal._cursorX = startOfLineX;
-		terminal._cursorY = startOfLineY;
+		startOfLineX = terminal.cursorX;
+		startOfLineY = terminal.cursorY;
 	}
 
 	// Text killed with C-w/C-u/C-k/C-backspace, to be restored by C-y
@@ -6531,7 +6747,7 @@ class LineGetter {
 							goto default;
 						goto case;
 					}
-					case 'd', 4: // ctrl+d will also send a newline-equivalent 
+					case 'd', 4: // ctrl+d will also send a newline-equivalent
 						if(ev.modifierState & ModifierState.alt) {
 							// gnu alias for kill word (also on ctrl+backspace)
 							justHitTab = false;
@@ -7852,7 +8068,7 @@ struct ScrollbackBuffer {
 				linePos++;
 				continue;
 			}
-		
+
 			terminal.moveTo(x, y + ((linePos >= 0) ? linePos : 0));
 
 			auto todo = line.components;
@@ -8265,6 +8481,24 @@ int approximate16Color(RGB color) {
 
 version(TerminalDirectToEmulator) {
 
+	void terminateTerminalProcess(T)(T threadId) {
+		version(Posix) {
+			pthread_kill(threadId, SIGQUIT); // or SIGKILL even?
+
+			assert(0);
+			//import core.sys.posix.pthread;
+			//pthread_cancel(widget.term.threadId);
+			//widget.term = null;
+		} else version(Windows) {
+			import core.sys.windows.windows;
+			auto hnd = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, TRUE, GetCurrentProcessId());
+			TerminateProcess(hnd, -1);
+			assert(0);
+		}
+	}
+
+
+
 	/++
 		Indicates the TerminalDirectToEmulator features
 		are present. You can check this with `static if`.
@@ -8411,6 +8645,19 @@ version(TerminalDirectToEmulator) {
 				Added June 15, 2021. Included in release v10.1.0.
 		+/
 		bool ctrlCCopies = false; // FIXME: i could make this context-sensitive too, so if text selected, copy, otherwise, cancel. prolly show in statu s bar
+
+		/++
+			When using the integrated terminal emulator, the default is to assume you want it.
+			But some users may wish to force the in-terminal fallback anyway at start up time.
+
+			Seeing this to `true` will skip attempting to create the gui window where a fallback
+			is available. It is ignored on systems where there is no fallback. Make sure that
+			[fallbackToDegradedTerminal] is set to `true` if you use this.
+
+			History:
+				Added October 4, 2022 (dub v10.10)
+		+/
+		bool preferDegradedTerminal = false;
 	}
 
 	/+
@@ -8574,6 +8821,7 @@ version(TerminalDirectToEmulator) {
 
 						_dup2(_fileno(stdout), _fileno(stderr));
 						setvbuf(stderr, null, _IOLBF, 128); // if I don't unbuffer this it can really confuse things
+						assert(0);
 					}
 
 					WindowsRead(0, 0, this.overlapped);
@@ -9047,6 +9295,8 @@ version(TerminalDirectToEmulator) {
 						auto xft = getXftDpi();
 						if(xft is float.init)
 							xft = 96;
+						// the xft passed as assumed means it will figure that's what the size
+						// is based on (which it is, inside xft) preventing the double scale problem
 						fontSize = widget.scaleWithDpi(fontSize, cast(int) xft);
 
 					}
@@ -9165,7 +9415,7 @@ version(TerminalDirectToEmulator) {
 				static if(UsingSimpledisplayX11) {
 					if((ev.state & ModifierState.alt) && ev.originalKeyEvent.charsPossible.length) {
 						keyToSend = cast(Key) ev.originalKeyEvent.charsPossible[0];
-					} 
+					}
 				}
 
 				defaultKeyHandler!(typeof(ev.key))(
@@ -9194,18 +9444,9 @@ version(TerminalDirectToEmulator) {
 							widget.parentWindow.close(); // I'm gonna let it segfault if this is null cuz like that isn't supposed to happen
 							return;
 						}
-						pthread_kill(widget.term.threadId, SIGQUIT); // or SIGKILL even?
-
-						assert(0);
-						//import core.sys.posix.pthread;
-						//pthread_cancel(widget.term.threadId);
-						//widget.term = null;
-					} else version(Windows) {
-						import core.sys.windows.windows;
-						auto hnd = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, TRUE, GetCurrentProcessId());
-						TerminateProcess(hnd, -1);
-						assert(0);
 					}
+
+					terminateTerminalProcess(widget.term.threadId);
 				} else if(c == 3) {// && !ev.shiftKey) /* ctrl+c, interrupt. But NOT ctrl+shift+c as that's a user-defined keystroke and/or "copy", but ctrl+shift+c never gets sent here.... thanks to the skipNextChar above */ {
 					sendSigInt();
 				} else {
