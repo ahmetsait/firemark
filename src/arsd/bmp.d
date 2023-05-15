@@ -28,7 +28,9 @@ MemoryImage readBmp(string filename) {
 
 /++
 	Reads a bitmap out of an in-memory array of data. For example, from the data returned from [std.file.read].
+
 	It forwards the arguments to [readBmpIndirect], so see that for more details.
+
 	If you are given a raw pointer to some data, you might just slice it: bytes 2-6 of the file header (if present)
 	are a little-endian uint giving the file size. You might slice only to that, or you could slice right to `int.max`
 	and trust the library to bounds check for you based on data integrity checks.
@@ -38,7 +40,7 @@ MemoryImage readBmp(in ubyte[] data, bool lookForFileHeader = true, bool hackAro
 	const(ubyte)[] current = data;
 	void specialFread(void* tgt, size_t size) {
 		while(size) {
-			if (current.length == 0) return;
+			if (current.length == 0) throw new Exception("out of bmp data"); // it's not *that* fatal, so don't throw RangeError
 			//import std.stdio; writefln("%04x", position);
 			*cast(ubyte*)(tgt) = current[0];
 			current = current[1 .. $];
@@ -53,9 +55,12 @@ MemoryImage readBmp(in ubyte[] data, bool lookForFileHeader = true, bool hackAro
 
 /++
 	Reads using a delegate to read instead of assuming a direct file. View the source of `readBmp`'s overloads for fairly simple examples of how you can use it
+
 	History:
 		The `lookForFileHeader` param was added in July 2020.
+
 		The `hackAround64BitLongs` param was added December 21, 2020. You should probably never use this unless you know for sure you have a file corrupted in this specific way. View the source to see a comment inside the file to describe it a bit more.
+
 		The `hasAndMask` param was added July 21, 2022. This is set to true if it is a bitmap from a .ico file or similar, where the top half of the file (by height) is the xor mask, then the bottom half is the and mask.
 +/
 MemoryImage readBmpIndirect(scope void delegate(void*, size_t) fread, bool lookForFileHeader = true, bool hackAround64BitLongs = false, bool hasAndMask = false) {
@@ -550,6 +555,11 @@ void main() {
 }
 +/
 
+/++
+	Writes a bitmap file to a delegate, byte by byte, with data from the given image.
+
+	If `prependFileHeader` is `true`, it will add the bitmap file header too.
++/
 void writeBmpIndirect(MemoryImage img, scope void delegate(ubyte) fwrite, bool prependFileHeader) {
 
 	void write4(uint what){
