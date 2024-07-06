@@ -1,9 +1,25 @@
 /++
+	$(PITFALL
+		Please note: the api and behavior of this module is not externally stable at this time. See the documentation on specific functions for details.
+	)
+
 	Shared core functionality including exception helpers, library loader, event loop, and possibly more. Maybe command line processor and uda helper and some basic shared annotation types.
 
-	I'll probably move the url, websocket, and ssl stuff in here too as they are often shared. Maybe a small internationalization helper type (a hook for external implementation) and COM helpers too.
+	I'll probably move the url, websocket, and ssl stuff in here too as they are often shared. Maybe a small internationalization helper type (a hook for external implementation) and COM helpers too. I might move the process helpers out to their own module - even things in here are not considered stable to library users at this time!
 
-	If you use this directly outside the arsd library, you might consider using `static import` since names in here are likely to clash with Phobos if you use them together. `static import` will let you easily disambiguate and avoid name conflict errors if I add more here. Some names even clash deliberately to remind me to avoid some antipatterns inside the arsd modules!
+	If you use this directly outside the arsd library despite its current instability caveats, you might consider using `static import` since names in here are likely to clash with Phobos if you use them together. `static import` will let you easily disambiguate and avoid name conflict errors if I add more here. Some names even clash deliberately to remind me to avoid some antipatterns inside the arsd modules!
+
+	## Contributor notes
+
+	arsd.core should be focused on things that enable interoperability primarily and secondarily increased code quality between other, otherwise independent arsd modules. As a foundational library, it is not permitted to import anything outside the druntime `core` namespace, except in templates and examples not normally compiled in. This keeps it independent and avoids transitive dependency spillover to end users while also keeping compile speeds fast. To help keep builds snappy, also avoid significant use of ctfe inside this module.
+
+	On my linux computer, `dmd -unittest -main core.d` takes about a quarter second to run. We do not want this to grow.
+
+	`@safe` compatibility is ok when it isn't too big of a hassle. `@nogc` is a non-goal. I might accept it on some of the trivial functions but if it means changing the logic in any way to support, you will need a compelling argument to justify it. The arsd libs are supposed to be reliable and easy to use. That said, of course, don't be unnecessarily wasteful - if you can easily provide a reliable and easy to use way to let advanced users do their thing without hurting the other cases, let's discuss it.
+
+	If functionality is not needed by multiple existing arsd modules, consider adding a new module instead of adding it to the core.
+
+	Unittests should generally be hidden behind a special version guard so they don't interfere with end user tests.
 
 	History:
 		Added March 2023 (dub v11.0). Several functions were migrated in here at that time, noted individually. Members without a note were added with the module.
@@ -41,10 +57,13 @@ version(Windows) {
 	import core.sys.windows.winsock2;
 
 	pragma(lib, "user32");
+	pragma(lib, "ws2_32");
 } else version(linux) {
 	version=Arsd_core_epoll;
 
-	version=Arsd_core_has_cloexec;
+	static if(__VERSION__ >= 2098) {
+		version=Arsd_core_has_cloexec;
+	}
 } else version(FreeBSD) {
 	version=Arsd_core_kqueue;
 
@@ -68,7 +87,16 @@ version(Windows) {
 	version=Arsd_core_kqueue;
 
 	import core.sys.darwin.sys.event;
+
+	version(DigitalMars) {
+		version=OSXCocoa;
+	}
 }
+
+version(OSXCocoa)
+	enum CocoaAvailable = true;
+else
+	enum CocoaAvailable = false;
 
 version(Posix) {
 	import core.sys.posix.signal;
@@ -881,11 +909,17 @@ unittest {
 +/
 nothrow @safe @nogc pure
 inout(char)[] stripInternal(return inout(char)[] s) {
+	bool isAllWhitespace = true;
 	foreach(i, char c; s)
 		if(c != ' ' && c != '\t' && c != '\n' && c != '\r') {
 			s = s[i .. $];
+			isAllWhitespace = false;
 			break;
 		}
+
+	if(isAllWhitespace)
+		return s[$..$];
+
 	for(int a = cast(int)(s.length - 1); a > 0; a--) {
 		char c = s[a];
 		if(c != ' ' && c != '\t' && c != '\n' && c != '\r') {
@@ -897,15 +931,19 @@ inout(char)[] stripInternal(return inout(char)[] s) {
 	return s;
 }
 
+/// ditto
 nothrow @safe @nogc pure
 inout(char)[] stripRightInternal(return inout(char)[] s) {
-	for(int a = cast(int)(s.length - 1); a > 0; a--) {
-		char c = s[a];
+	bool isAllWhitespace = true;
+	foreach_reverse(a, c; s) {
 		if(c != ' ' && c != '\t' && c != '\n' && c != '\r') {
 			s = s[0 .. a + 1];
+			isAllWhitespace = false;
 			break;
 		}
 	}
+	if(isAllWhitespace)
+		s = s[0..0];
 
 	return s;
 
@@ -1347,6 +1385,40 @@ class ArsdExceptionBase : object.Exception {
 }
 
 /++
+
++/
+class InvalidArgumentsException : ArsdExceptionBase {
+	static struct InvalidArgument {
+		string name;
+		string description;
+		LimitedVariant givenValue;
+	}
+
+	InvalidArgument[] invalidArguments;
+
+	this(InvalidArgument[] invalidArguments, string functionName = __PRETTY_FUNCTION__, string file = __FILE__, size_t line = __LINE__, Throwable next = null) {
+		this.invalidArguments = invalidArguments;
+		super(functionName, file, line, next);
+	}
+
+	this(string argumentName, string argumentDescription, LimitedVariant givenArgumentValue = LimitedVariant.init, string functionName = __PRETTY_FUNCTION__, string file = __FILE__, size_t line = __LINE__, Throwable next = null) {
+		this([
+			InvalidArgument(argumentName, argumentDescription, givenArgumentValue)
+		], functionName, file, line, next);
+	}
+
+	this(string argumentName, string argumentDescription, string functionName = __PRETTY_FUNCTION__, string file = __FILE__, size_t line = __LINE__, Throwable next = null) {
+		this(argumentName, argumentDescription, LimitedVariant.init, functionName, file, line, next);
+	}
+
+	override void getAdditionalPrintableInformation(scope void delegate(string name, in char[] value) sink) const {
+		// FIXME: print the details better
+		foreach(arg; invalidArguments)
+			sink("invalidArguments[]", arg.name ~ " " ~ arg.description);
+	}
+}
+
+/++
 	Base class for when you've requested a feature that is not available. It may not be available because it is possible, but not yet implemented, or it might be because it is impossible on your operating system.
 +/
 class FeatureUnavailableException : ArsdExceptionBase {
@@ -1529,7 +1601,7 @@ struct SystemErrorCode {
 		Constructs a string containing both the code and the explanation string.
 	+/
 	string toString() const {
-		return codeAsString ~ " " ~ errorString;
+		return "[" ~ codeAsString ~ "] " ~ errorString;
 	}
 
 	/++
@@ -1544,7 +1616,7 @@ struct SystemErrorCode {
 				return intToString(code, buffer[]).idup;
 			case Type.win32:
 				buffer[0 .. 2] = "0x";
-				return buffer[0 .. 2 + intToString(code, buffer[2 .. $], IntToStringArgs().withRadix(16).withPadding(8)).length].idup;
+				return buffer[0 .. 2 + intToString(cast(uint) code, buffer[2 .. $], IntToStringArgs().withRadix(16).withPadding(8)).length].idup;
 		}
 	}
 
@@ -1808,7 +1880,7 @@ enum ThreadToRunIn {
 
 		Ad-Hoc thread - something running an event loop that isn't another thing
 		Controller thread - running an explicit event loop instance set as not a task runner or blocking worker
-		UI thread - simpledisplay's event loop, which it will require remain live for the duration of the program (running two .eventLoops without a parent EventLoop instance will become illegal, throwing at runtime if it happens telling people to change their code
+		UI thread - simpledisplay's event loop, which it will require remain live for the duration of the program (running two .eventLoops without a parent EventLoop instance will become illegal, throwing at runtime if it happens telling people to change their code)
 
 		Windows HANDLES will always be listened on the thread itself that is requesting, UNLESS it is a worker/helper thread, in which case it goes to a coordinator thread. since it prolly can't rely on the parent per se this will have to be one created by arsd core init, UNLESS the parent is inside an explicit EventLoop structure.
 
@@ -2506,6 +2578,27 @@ class AsyncFile : AbstractFile {
 
 }
 
+/++
+	Reads or writes a file in one call. It might internally yield, but is generally blocking if it returns values. The callback ones depend on the implementation.
+
+	Tip: prefer the callback ones. If settings where async is possible, it will do async, and if not, it will sync.
+
+	NOT IMPLEMENTED
++/
+void writeFile(string filename, const(void)[] contents) {
+
+}
+
+/// ditto
+string readTextFile(string filename, string fileEncoding = null) {
+	return null;
+}
+
+/// ditto
+const(ubyte[]) readBinaryFile(string filename) {
+	return null;
+}
+
 /+
 private Class recycleObject(Class, Args...)(Class objectToRecycle, Args args) {
 	if(objectToRecycle is null)
@@ -2681,98 +2774,328 @@ class NamedPipeServer {
 	// can be on a specific thread or on any thread
 }
 
-/++
-	Looking these up might be done asynchronously. The objects both represent an async request and its result, which is the actual address the operating system uses.
-
-	When you create an address, it holds a request. You can call `start` and `waitForCompletion` like with other async requests. The request may be run in a helper thread.
-
-	Unlike most the async objects though, its methods will implicitly call `waitForCompletion`.
-
-	Note that The current implementation just blocks.
-+/
-class SocketAddress /* : AsyncOperationRequest, AsyncOperationResponse */ {
-	// maybe accept url?
-	// unix:///home/me/thing
-	// ip://0.0.0.0:4555
-	// ipv6://[00:00:00:00:00:00]
-
-	// address info
-	abstract int domain();
-	// FIXME: find all cases of this and make sure it is completed first
-	abstract sockaddr* rawAddr();
-	abstract socklen_t rawAddrLength();
-
-	/+
-	// request interface
-	abstract void start();
-	abstract SocketAddress waitForCompletion();
-	abstract bool isComplete();
-
-	// response interface
-	abstract bool wasSuccessful();
-	+/
+private version(Windows) extern(Windows) {
+	const(char)* inet_ntop(int, const void*, char*, socklen_t);
 }
 
-/+
-class BluetoothAddress : SocketAddress {
+/++
+	Some functions that return arrays allow you to provide your own buffer. These are indicated in the type system as `UserProvidedBuffer!Type`, and you get to decide what you want to happen if the buffer is too small via the [OnOutOfSpace] parameter.
+
+	These are usually optional, since an empty user provided buffer with the default policy of reallocate will also work fine for whatever needs to be returned, thanks to the garbage collector taking care of it for you.
+
+	The API inside `UserProvidedBuffer` is all private to the arsd library implementation; your job is just to provide the buffer to it with [provideBuffer] or a constructor call and decide on your on-out-of-space policy.
+
+	$(TIP
+		To properly size a buffer, I suggest looking at what covers about 80% of cases. Trying to cover everything often leads to wasted buffer space, and if you use a reallocate policy it can cover the rest. You might be surprised how far just two elements can go!
+	)
+
+	History:
+		Added August 4, 2023 (dub v11.0)
++/
+struct UserProvidedBuffer(T) {
+	private T[] buffer;
+	private int actualLength;
+	private OnOutOfSpace policy;
+
+	/++
+
+	+/
+	public this(scope T[] buffer, OnOutOfSpace policy = OnOutOfSpace.reallocate) {
+		this.buffer = buffer;
+		this.policy = policy;
+	}
+
+	package(arsd) bool append(T item) {
+		if(actualLength < buffer.length) {
+			buffer[actualLength++] = item;
+			return true;
+		} else final switch(policy) {
+			case OnOutOfSpace.discard:
+				return false;
+			case OnOutOfSpace.exception:
+				throw ArsdException!"Buffer out of space"(buffer.length, actualLength);
+			case OnOutOfSpace.reallocate:
+				buffer ~= item;
+				actualLength++;
+				return true;
+		}
+	}
+
+	package(arsd) T[] slice() return {
+		return buffer[0 .. actualLength];
+	}
+}
+
+/// ditto
+UserProvidedBuffer!T provideBuffer(T)(scope T[] buffer, OnOutOfSpace policy = OnOutOfSpace.reallocate) {
+	return UserProvidedBuffer!T(buffer, policy);
+}
+
+/++
+	Possible policies for [UserProvidedBuffer]s that run out of space.
++/
+enum OnOutOfSpace {
+	reallocate, /// reallocate the buffer with the GC to make room
+	discard, /// discard all contents that do not fit in your provided buffer
+	exception, /// throw an exception if there is data that would not fit in your provided buffer
+}
+
+
+/++
+	For functions that give you an unknown address, you can use this to hold it.
+
+	Can get:
+		ip4
+		ip6
+		unix
+		abstract_
+
+		name lookup for connect (stream or dgram)
+			request canonical name?
+
+		interface lookup for bind (stream or dgram)
++/
+struct SocketAddress {
+	import core.sys.posix.netdb;
+
+	/++
+		Provides the set of addresses to listen on all supported protocols on the machine for the given interfaces. `localhost` only listens on the loopback interface, whereas `allInterfaces` will listen on loopback as well as the others on the system (meaning it may be publicly exposed to the internet).
+
+		If you provide a buffer, I recommend using one of length two, so `SocketAddress[2]`, since this usually provides one address for ipv4 and one for ipv6.
+	+/
+	static SocketAddress[] localhost(ushort port, return UserProvidedBuffer!SocketAddress buffer = null) {
+		buffer.append(ip6("::1", port));
+		buffer.append(ip4("127.0.0.1", port));
+		return buffer.slice;
+	}
+
+	/// ditto
+	static SocketAddress[] allInterfaces(ushort port, return UserProvidedBuffer!SocketAddress buffer = null) {
+		char[16] str;
+		return allInterfaces(intToString(port, str[]), buffer);
+	}
+
+	/// ditto
+	static SocketAddress[] allInterfaces(scope const char[] serviceOrPort, return UserProvidedBuffer!SocketAddress buffer = null) {
+		addrinfo hints;
+		hints.ai_flags = AI_PASSIVE;
+		hints.ai_socktype = SOCK_STREAM; // just to filter it down a little tbh
+		return get(null, serviceOrPort, &hints, buffer);
+	}
+
+	/++
+		Returns a single address object for the given protocol and parameters.
+
+		You probably should generally prefer [get], [localhost], or [allInterfaces] to have more flexible code.
+	+/
+	static SocketAddress ip4(scope const char[] address, ushort port, bool forListening = false) {
+		return getSingleAddress(AF_INET, AI_NUMERICHOST | (forListening ? AI_PASSIVE : 0), address, port);
+	}
+
+	/// ditto
+	static SocketAddress ip4(ushort port) {
+		return ip4(null, port, true);
+	}
+
+	/// ditto
+	static SocketAddress ip6(scope const char[] address, ushort port, bool forListening = false) {
+		return getSingleAddress(AF_INET6, AI_NUMERICHOST | (forListening ? AI_PASSIVE : 0), address, port);
+	}
+
+	/// ditto
+	static SocketAddress ip6(ushort port) {
+		return ip6(null, port, true);
+	}
+
+	/// ditto
+	static SocketAddress unix(scope const char[] path) {
+		// FIXME
+		SocketAddress addr;
+		return addr;
+	}
+
+	/// ditto
+	static SocketAddress abstract_(scope const char[] path) {
+		char[190] buffer = void;
+		buffer[0] = 0;
+		buffer[1 .. path.length] = path[];
+		return unix(buffer[0 .. 1 + path.length]);
+	}
+
+	private static SocketAddress getSingleAddress(int family, int flags, scope const char[] address, ushort port) {
+		addrinfo hints;
+		hints.ai_family = family;
+		hints.ai_flags = flags;
+
+		char[16] portBuffer;
+		char[] portString = intToString(port, portBuffer[]);
+
+		SocketAddress[1] addr;
+		auto res = get(address, portString, &hints, provideBuffer(addr[]));
+		if(res.length == 0)
+			throw ArsdException!"bad address"(address.idup, port);
+		return res[0];
+	}
+
+	/++
+		Calls `getaddrinfo` and returns the array of results. It will populate the data into the buffer you provide, if you provide one, otherwise it will allocate its own.
+	+/
+	static SocketAddress[] get(scope const char[] nodeName, scope const char[] serviceOrPort, addrinfo* hints = null, return UserProvidedBuffer!SocketAddress buffer = null, scope bool delegate(scope addrinfo* ai) filter = null) @trusted {
+		addrinfo* res;
+		CharzBuffer node = nodeName;
+		CharzBuffer service = serviceOrPort;
+		auto ret = getaddrinfo(nodeName is null ? null : node.ptr, serviceOrPort is null ? null : service.ptr, hints, &res);
+		if(ret == 0) {
+			auto current = res;
+			while(current) {
+				if(filter is null || filter(current)) {
+					SocketAddress addr;
+					addr.addrlen = cast(socklen_t) current.ai_addrlen;
+					switch(current.ai_family) {
+						case AF_INET:
+							addr.in4 = * cast(sockaddr_in*) current.ai_addr;
+							break;
+						case AF_INET6:
+							addr.in6 = * cast(sockaddr_in6*) current.ai_addr;
+							break;
+						case AF_UNIX:
+							addr.unix_address = * cast(sockaddr_un*) current.ai_addr;
+							break;
+						default:
+							// skip
+					}
+
+					if(!buffer.append(addr))
+						break;
+				}
+
+				current = current.ai_next;
+			}
+
+			freeaddrinfo(res);
+		} else {
+			version(Windows) {
+				throw new WindowsApiException("getaddrinfo", ret);
+			} else {
+				const char* error = gai_strerror(ret);
+			}
+		}
+
+		return buffer.slice;
+	}
+
+	/++
+		Returns a string representation of the address that identifies it in a custom format.
+
+		$(LIST
+			* Unix domain socket addresses are their path prefixed with "unix:", unless they are in the abstract namespace, in which case it is prefixed with "abstract:" and the zero is trimmed out. For example, "unix:/tmp/pipe".
+
+			* IPv4 addresses are written in dotted decimal followed by a colon and the port number. For example, "127.0.0.1:8080".
+
+			* IPv6 addresses are written in colon separated hex format, but enclosed in brackets, then followed by the colon and port number. For example, "[::1]:8080".
+		)
+	+/
+	string toString() const @trusted {
+		char[200] buffer;
+		switch(address.sa_family) {
+			case AF_INET:
+				auto writable = stringz(inet_ntop(address.sa_family, &in4.sin_addr, buffer.ptr, buffer.length));
+				auto it = writable.borrow;
+				buffer[it.length] = ':';
+				auto numbers = intToString(port, buffer[it.length + 1 .. $]);
+				return buffer[0 .. it.length + 1 + numbers.length].idup;
+			case AF_INET6:
+				buffer[0] = '[';
+				auto writable = stringz(inet_ntop(address.sa_family, &in6.sin6_addr, buffer.ptr + 1, buffer.length - 1));
+				auto it = writable.borrow;
+				buffer[it.length + 1] = ']';
+				buffer[it.length + 2] = ':';
+				auto numbers = intToString(port, buffer[it.length + 3 .. $]);
+				return buffer[0 .. it.length + 3 + numbers.length].idup;
+			case AF_UNIX:
+				// FIXME: it might be abstract in which case stringz is wrong!!!!!
+				auto writable = stringz(cast(char*) unix_address.sun_path.ptr).borrow;
+				if(writable.length == 0)
+					return "unix:";
+				string prefix = writable[0] == 0 ? "abstract:" : "unix:";
+				buffer[0 .. prefix.length] = prefix[];
+				buffer[prefix.length .. prefix.length + writable.length] = writable[writable[0] == 0 ? 1 : 0 .. $];
+				return buffer.idup;
+			case AF_UNSPEC:
+				return "<unspecified address>";
+			default:
+				return "<unsupported address>"; // FIXME
+		}
+	}
+
+	ushort port() const @trusted {
+		switch(address.sa_family) {
+			case AF_INET:
+				return ntohs(in4.sin_port);
+			case AF_INET6:
+				return ntohs(in6.sin6_port);
+			default:
+				return 0;
+		}
+	}
+
+	/+
+	@safe unittest {
+		SocketAddress[4] buffer;
+		foreach(addr; SocketAddress.get("arsdnet.net", "http", null, provideBuffer(buffer[])))
+			writeln(addr.toString());
+	}
+	+/
+
+	/+
+	unittest {
+		// writeln(SocketAddress.ip4(null, 4444, true));
+		// writeln(SocketAddress.ip4("400.3.2.1", 4444));
+		// writeln(SocketAddress.ip4("bar", 4444));
+		foreach(addr; localhost(4444))
+			writeln(addr.toString());
+	}
+	+/
+
+	socklen_t addrlen = typeof(this).sizeof - socklen_t.sizeof; // the size of the union below
+
+	union {
+		sockaddr address;
+
+		sockaddr_storage storage;
+
+		sockaddr_in in4;
+		sockaddr_in6 in6;
+
+		sockaddr_un unix_address;
+	}
+
+	/+
+	this(string node, string serviceOrPort, int family = 0) {
+		// need to populate the approrpiate address and the length and make sure you set sa_family
+	}
+	+/
+
+	int domain() {
+		return address.sa_family;
+	}
+	sockaddr* rawAddr() return {
+		return &address;
+	}
+	socklen_t rawAddrLength() {
+		return addrlen;
+	}
+
 	// FIXME it is AF_BLUETOOTH
 	// see: https://people.csail.mit.edu/albert/bluez-intro/x79.html
 	// see: https://learn.microsoft.com/en-us/windows/win32/Bluetooth/bluetooth-programming-with-windows-sockets
 }
-+/
 
-version(Posix) // FIXME: find the sockaddr_un definition for Windows too and add it in
-final class UnixAddress : SocketAddress {
-	sockaddr_un address;
-
-	override int domain() {
-		return AF_UNIX;
+private version(Windows) {
+	struct sockaddr_un {
+		ushort sun_family;
+		char[108] sun_path;
 	}
-
-	override sockaddr* rawAddr() {
-		return cast(sockaddr*) &address;
-	}
-	override socklen_t rawAddrLength() {
-		return address.sizeof;
-	}
-}
-
-final class IpAddress : SocketAddress {
-	sockaddr_in address;
-
-	override int domain() {
-		return AF_INET;
-	}
-
-	override sockaddr* rawAddr() {
-		return cast(sockaddr*) &address;
-	}
-	override socklen_t rawAddrLength() {
-		return address.sizeof;
-	}
-}
-
-final class Ipv6Address : SocketAddress {
-	sockaddr_in6 address;
-
-	override int domain() {
-		return AF_INET6;
-	}
-
-	override sockaddr* rawAddr() {
-		return cast(sockaddr*) &address;
-	}
-	override socklen_t rawAddrLength() {
-		return address.sizeof;
-	}
-}
-
-/++
-	For functions that give you an unknown address, you can use this to hold it.
-+/
-struct SocketAddressBuffer {
-	sockaddr address;
-	socklen_t addrlen;
 }
 
 class AsyncSocket : AsyncFile {
@@ -2821,6 +3144,11 @@ class AsyncSocket : AsyncFile {
 		version(Posix) {
 			makeNonBlocking(handle);
 			setCloExec(handle);
+		}
+
+		if(address.domain == AF_INET6) {
+			int opt = 1;
+			setsockopt(handle, IPPROTO_IPV6 /*SOL_IPV6*/, IPV6_V6ONLY, &opt, opt.sizeof);
 		}
 
 		// FIXME: chekc for broadcast
@@ -2893,8 +3221,8 @@ class AsyncSocket : AsyncFile {
 	/++
 		You can also construct your own request externally to control the memory more.
 	+/
-	AsyncConnectRequest connect(SocketAddress address) {
-		return new AsyncConnectRequest(this, address);
+	AsyncConnectRequest connect(SocketAddress address, ubyte[] bufferToSend = null) {
+		return new AsyncConnectRequest(this, address, bufferToSend);
 	}
 
 	/++
@@ -2923,25 +3251,29 @@ class AsyncSocket : AsyncFile {
 	/++
 		You can also construct your own request externally to control the memory more.
 	+/
-	AsyncSendRequest sendTo(const(ubyte)[] buffer, SocketAddress address, int flags = 0) {
+	AsyncSendRequest sendTo(const(ubyte)[] buffer, SocketAddress* address, int flags = 0) {
 		return new AsyncSendRequest(this, buffer, address, flags);
 	}
 	/++
 		You can also construct your own request externally to control the memory more.
 	+/
-	AsyncReceiveRequest receiveFrom(ubyte[] buffer, SocketAddressBuffer* address, int flags = 0) {
+	AsyncReceiveRequest receiveFrom(ubyte[] buffer, SocketAddress* address, int flags = 0) {
 		return new AsyncReceiveRequest(this, buffer, address, flags);
 	}
 
 	/++
 	+/
 	SocketAddress localAddress() {
-		return null; // FIXME
+		SocketAddress addr;
+		getsockname(handle, &addr.address, &addr.addrlen);
+		return addr;
 	}
 	/++
 	+/
 	SocketAddress peerAddress() {
-		return null; // FIXME
+		SocketAddress addr;
+		getpeername(handle, &addr.address, &addr.addrlen);
+		return addr;
 	}
 
 	// for unix sockets on unix only: send/receive fd, get peer creds
@@ -2957,9 +3289,17 @@ class AsyncSocket : AsyncFile {
 }
 
 /++
+	Initiates a connection request and optionally sends initial data as soon as possible.
+
+	Calls `ConnectEx` on Windows and emulates it on other systems.
+
+	The entire buffer is sent before the operation is considered complete.
+
+	NOT IMPLEMENTED / NOT STABLE
 +/
 class AsyncConnectRequest : AsyncOperationRequest {
-	this(AsyncSocket socket, SocketAddress address) {
+	// FIXME: i should take a list of addresses and take the first one that succeeds, so a getaddrinfo can be sent straight in.
+	this(AsyncSocket socket, SocketAddress address, ubyte[] dataToWrite) {
 
 	}
 
@@ -2983,23 +3323,77 @@ class AsyncConnectResponse : AsyncOperationResponse {
 
 }
 
+// FIXME: TransmitFile/sendfile support
+
 /++
+	Calls `AcceptEx` on Windows and emulates it on other systems.
+
+	NOT IMPLEMENTED / NOT STABLE
 +/
 class AsyncAcceptRequest : AsyncOperationRequest {
-	this(AsyncSocket socket) {
-
-	}
+	AsyncSocket socket;
 
 	override void start() {}
 	override void cancel() {}
 	override bool isComplete() { return true; }
 	override AsyncConnectResponse waitForCompletion() { assert(0); }
+
+
+	struct LowLevelOperation {
+		AsyncSocket file;
+		ubyte[] buffer;
+		SocketAddress* address;
+
+		this(typeof(this.tupleof) args) {
+			this.tupleof = args;
+		}
+
+		version(Windows) {
+			auto opCall(OVERLAPPED* overlapped, LPOVERLAPPED_COMPLETION_ROUTINE ocr) {
+				WSABUF buf;
+				buf.len = cast(int) buffer.length;
+				buf.buf = cast(typeof(buf.buf)) buffer.ptr;
+
+				uint flags;
+
+				if(address is null)
+					return WSARecv(file.handle, &buf, 1, null, &flags, overlapped, ocr);
+				else {
+					return WSARecvFrom(file.handle, &buf, 1, null, &flags, &(address.address), &(address.addrlen), overlapped, ocr);
+				}
+			}
+		} else {
+			auto opCall() {
+				int flags;
+				if(address is null)
+					return core.sys.posix.sys.socket.recv(file.handle, buffer.ptr, buffer.length, flags);
+				else
+					return core.sys.posix.sys.socket.recvfrom(file.handle, buffer.ptr, buffer.length, flags, &(address.address), &(address.addrlen));
+			}
+		}
+
+		string errorString() {
+			return "Receive";
+		}
+	}
+	mixin OverlappedIoRequest!(AsyncAcceptResponse, LowLevelOperation);
+
+	this(AsyncSocket socket, ubyte[] buffer = null, SocketAddress* address = null) {
+		llo = LowLevelOperation(socket, buffer, address);
+		this.response = typeof(this.response).defaultConstructed;
+	}
+
+	// can also look up the local address
 }
 /++
 +/
 class AsyncAcceptResponse : AsyncOperationResponse {
 	AsyncSocket newSocket;
 	const SystemErrorCode errorCode;
+
+	this(SystemErrorCode errorCode, ubyte[] buffer) {
+		this.errorCode = errorCode;
+	}
 
 	this(AsyncSocket newSocket, SystemErrorCode errorCode) {
 		this.newSocket = newSocket;
@@ -3018,7 +3412,7 @@ class AsyncReceiveRequest : AsyncOperationRequest {
 		AsyncSocket file;
 		ubyte[] buffer;
 		int flags;
-		SocketAddressBuffer* address;
+		SocketAddress* address;
 
 		this(typeof(this.tupleof) args) {
 			this.tupleof = args;
@@ -3053,7 +3447,7 @@ class AsyncReceiveRequest : AsyncOperationRequest {
 	}
 	mixin OverlappedIoRequest!(AsyncReceiveResponse, LowLevelOperation);
 
-	this(AsyncSocket socket, ubyte[] buffer, SocketAddressBuffer* address, int flags) {
+	this(AsyncSocket socket, ubyte[] buffer, SocketAddress* address, int flags) {
 		llo = LowLevelOperation(socket, buffer, flags, address);
 		this.response = typeof(this.response).defaultConstructed;
 	}
@@ -3082,7 +3476,7 @@ class AsyncSendRequest : AsyncOperationRequest {
 		AsyncSocket file;
 		const(ubyte)[] buffer;
 		int flags;
-		SocketAddress address;
+		SocketAddress* address;
 
 		this(typeof(this.tupleof) args) {
 			this.tupleof = args;
@@ -3115,7 +3509,7 @@ class AsyncSendRequest : AsyncOperationRequest {
 	}
 	mixin OverlappedIoRequest!(AsyncSendResponse, LowLevelOperation);
 
-	this(AsyncSocket socket, const(ubyte)[] buffer, SocketAddress address, int flags) {
+	this(AsyncSocket socket, const(ubyte)[] buffer, SocketAddress* address, int flags) {
 		llo = LowLevelOperation(socket, buffer, flags, address);
 		this.response = typeof(this.response).defaultConstructed;
 	}
@@ -3139,22 +3533,58 @@ class AsyncSendResponse : AsyncOperationResponse {
 }
 
 /++
-	A socket bound and ready to accept connections.
+	A set of sockets bound and ready to accept connections on worker threads.
 
-	Depending on the specified address, it can be tcp, tcpv6, or unix domain.
+	Depending on the specified address, it can be tcp, tcpv6, unix domain, or all of the above.
+
+	NOT IMPLEMENTED / NOT STABLE
 +/
 class StreamServer {
-	this(SocketAddress listenTo) {
+	AsyncSocket[] sockets;
 
+	this(SocketAddress[] listenTo, int backlog = 8) {
+		foreach(listen; listenTo) {
+			auto socket = new AsyncSocket(listen, SOCK_STREAM);
+
+			// FIXME: allInterfaces for ipv6 also covers ipv4 so the bind can fail...
+			// so we have to permit it to fail w/ address in use if we know we already
+			// are listening to ipv6
+
+			// or there is a setsockopt ipv6 only thing i could set.
+
+			socket.bind(listen);
+			socket.listen(backlog);
+			sockets ~= socket;
+
+			// writeln(socket.localAddress.port);
+		}
+
+		// i have to start accepting on each thread for each socket...
 	}
 	// when a new connection arrives, it calls your callback
 	// can be on a specific thread or on any thread
+
+
+	void start() {
+		foreach(socket; sockets) {
+			auto request = socket.accept();
+			request.start();
+		}
+	}
 }
+
+/+
+unittest {
+	auto ss = new StreamServer(SocketAddress.localhost(0));
+}
++/
 
 /++
 	A socket bound and ready to use receiveFrom
 
 	Depending on the address, it can be udp or unix domain.
+
+	NOT IMPLEMENTED / NOT STABLE
 +/
 class DatagramListener {
 	// whenever a udp message arrives, it calls your callback
@@ -3355,6 +3785,7 @@ unittest {
 	// dispatches change event to either your thread or maybe the any task` queue.
 
 /++
+	PARTIALLY IMPLEMENTED / NOT STABLE
 
 +/
 class DirectoryWatcher {
@@ -3913,11 +4344,158 @@ class AsyncReadResponse : AsyncOperationResponse {
 		runHelperFunction() - whomever it reports to is the parent
 +/
 
-/+
-class Task : Fiber {
+class ScheduableTask : Fiber {
+	private void delegate() dg;
 
+	// linked list stuff
+	private static ScheduableTask taskRoot;
+	private ScheduableTask previous;
+	private ScheduableTask next;
+
+	// need the controlling thread to know how to wake it up if it receives a message
+	private Thread controllingThread;
+
+	// the api
+
+	this(void delegate() dg) {
+		assert(dg !is null);
+
+		this.dg = dg;
+		super(&taskRunner);
+
+		if(taskRoot !is null) {
+			this.next = taskRoot;
+			taskRoot.previous = this;
+		}
+		taskRoot = this;
+	}
+
+	/+
+	enum BehaviorOnCtrlC {
+		ignore,
+		cancel,
+		deliverMessage
+	}
+	+/
+
+	private bool cancelled;
+
+	public void cancel() {
+		this.cancelled = true;
+		// if this is running, we can throw immediately
+		// otherwise if we're calling from an appropriate thread, we can call it immediately
+		// otherwise we need to queue a wakeup to its own thread.
+		// tbh we should prolly just queue it every time
+	}
+
+	private void taskRunner() {
+		try {
+			dg();
+		} catch(TaskCancelledException tce) {
+			// this space intentionally left blank;
+			// the purpose of this exception is to just
+			// let the fiber's destructors run before we
+			// let it die.
+		} catch(Throwable t) {
+			if(taskUncaughtException is null) {
+				throw t;
+			} else {
+				taskUncaughtException(t);
+			}
+		} finally {
+			if(this is taskRoot) {
+				taskRoot = taskRoot.next;
+				if(taskRoot !is null)
+					taskRoot.previous = null;
+			} else {
+				assert(this.previous !is null);
+				assert(this.previous.next is this);
+				this.previous.next = this.next;
+				if(this.next !is null)
+					this.next.previous = this.previous;
+			}
+		}
+	}
 }
+
+/++
+
 +/
+void delegate(Throwable t) taskUncaughtException;
+
+/++
+	Gets an object that lets you control a schedulable task (which is a specialization of a fiber) and can be used in an `if` statement.
+
+	---
+		if(auto controller = inSchedulableTask()) {
+			controller.yieldUntilReadable(...);
+		}
+	---
+
+	History:
+		Added August 11, 2023 (dub v11.1)
++/
+SchedulableTaskController inSchedulableTask() {
+	import core.thread.fiber;
+
+	if(auto fiber = Fiber.getThis) {
+		return SchedulableTaskController(cast(ScheduableTask) fiber);
+	}
+
+	return SchedulableTaskController(null);
+}
+
+/// ditto
+struct SchedulableTaskController {
+	private this(ScheduableTask fiber) {
+		this.fiber = fiber;
+	}
+
+	private ScheduableTask fiber;
+
+	/++
+
+	+/
+	bool opCast(T : bool)() {
+		return fiber !is null;
+	}
+
+	/++
+
+	+/
+	version(Posix)
+	void yieldUntilReadable(NativeFileHandle handle) {
+		assert(fiber !is null);
+
+		auto cb = new CallbackHelper(() { fiber.call(); });
+
+		// FIXME: if the fd is already registered in this thread it can throw...
+		version(Windows)
+			auto rearmToken = getThisThreadEventLoop().addCallbackOnFdReadableOneShot(handle, cb);
+		else
+			auto rearmToken = getThisThreadEventLoop().addCallbackOnFdReadableOneShot(handle, cb);
+
+		// FIXME: this is only valid if the fiber is only ever going to run in this thread!
+		fiber.yield();
+
+		rearmToken.unregister();
+
+		// what if there are other messages, like a ctrl+c?
+		if(fiber.cancelled)
+			throw new TaskCancelledException();
+	}
+
+	version(Windows)
+	void yieldUntilSignaled(NativeFileHandle handle) {
+		// add it to the WaitForMultipleObjects thing w/ a cb
+	}
+}
+
+class TaskCancelledException : object.Exception {
+	this() {
+		super("Task cancelled");
+	}
+}
 
 private class CoreWorkerThread : Thread {
 	this(EventLoopType type) {
@@ -3935,7 +4513,13 @@ private class CoreWorkerThread : Thread {
 			atomicOp!"-="(runningCount, 1);
 		}
 
-		eventLoop.run(() => true);
+		eventLoop.run(() => cancelled);
+	}
+
+	private bool cancelled;
+
+	void cancel() {
+		cancelled = true;
 	}
 
 	EventLoopType type;
@@ -3978,6 +4562,14 @@ private class CoreWorkerThread : Thread {
 				started = true;
 			}
 		}
+
+		void cancelAll() {
+			foreach(runner; taskRunners)
+				runner.cancel();
+			foreach(runner; helperRunners)
+				runner.cancel();
+
+		}
 	}
 }
 
@@ -4003,6 +4595,7 @@ private int numberOfCpus() {
 
 	Its destructor runs the event loop then waits to for the workers to finish to clean them up.
 +/
+// FIXME: single instance?
 struct ArsdCoreApplication {
 	private ICoreEventLoop impl;
 
@@ -4033,21 +4626,25 @@ struct ArsdCoreApplication {
 	@disable new();
 
 	~this() {
-		run();
+		if(!alreadyRun)
+			run();
 		exitApplication();
 		waitForWorkersToExit(3000);
 	}
 
 	void exitApplication() {
-
+		CoreWorkerThread.cancelAll();
 	}
 
 	void waitForWorkersToExit(int timeoutMilliseconds) {
 
 	}
 
+	private bool alreadyRun;
+
 	void run() {
-		impl.run(() => true);
+		impl.run(() => false);
+		alreadyRun = true;
 	}
 }
 
@@ -4868,15 +5465,87 @@ enum ByteOrder {
 	bigEndian,
 }
 
+/++
+	A class to help write a stream of binary data to some target.
+
+	NOT YET FUNCTIONAL
++/
 class WritableStream {
+	/++
+
+	+/
 	this(size_t bufferSize) {
+		this(new ubyte[](bufferSize));
 	}
 
-	void put(T)() {}
+	/// ditto
+	this(ubyte[] buffer) {
+		this.buffer = buffer;
+	}
 
+	/++
+
+	+/
+	final void put(T)(T value, ByteOrder byteOrder = ByteOrder.irrelevant, string file = __FILE__, size_t line = __LINE__) {
+		static if(T.sizeof == 8)
+			ulong b;
+		else static if(T.sizeof == 4)
+			uint b;
+		else static if(T.sizeof == 2)
+			ushort b;
+		else static if(T.sizeof == 1)
+			ubyte b;
+		else static assert(0, "unimplemented type, try using just the basic types");
+
+		if(byteOrder == ByteOrder.irrelevant && T.sizeof > 1)
+			throw new InvalidArgumentsException("byteOrder", "byte order must be specified for type " ~ T.stringof ~ " because it is bigger than one byte", "WritableStream.put", file, line);
+
+		final switch(byteOrder) {
+			case ByteOrder.irrelevant:
+				writeOneByte(b);
+			break;
+			case ByteOrder.littleEndian:
+				foreach(i; 0 .. T.sizeof) {
+					writeOneByte(b & 0xff);
+					b >>= 8;
+				}
+			break;
+			case ByteOrder.bigEndian:
+				int amount = T.sizeof * 8 - 8;
+				foreach(i; 0 .. T.sizeof) {
+					writeOneByte((b >> amount) & 0xff);
+					amount -= 8;
+				}
+			break;
+		}
+	}
+
+	/// ditto
+	final void put(T : E[], E)(T value, ByteOrder elementByteOrder = ByteOrder.irrelevant, string file = __FILE__, size_t line = __LINE__) {
+		foreach(item; value)
+			put(item, elementByteOrder, file, line);
+	}
+
+	/++
+		Performs a final flush() call, then marks the stream as closed, meaning no further data will be written to it.
+	+/
+	void close() {
+		isClosed_ = true;
+	}
+
+	/++
+		Writes what is currently in the buffer to the target and waits for the target to accept it.
+		Please note: if you are subclassing this to go to a different target
+	+/
 	void flush() {}
 
-	bool isClosed() { return true; }
+	/++
+		Returns true if either you closed it or if the receiving end closed their side, indicating they
+		don't want any more data.
+	+/
+	bool isClosed() {
+		return isClosed_;
+	}
 
 	// hasRoomInBuffer
 	// canFlush
@@ -4884,6 +5553,20 @@ class WritableStream {
 
 	// flushImpl
 	// markFinished / close - tells the other end you're done
+
+	private final writeOneByte(ubyte value) {
+		if(bufferPosition == buffer.length)
+			flush();
+
+		buffer[bufferPosition++] = value;
+	}
+
+
+	private {
+		ubyte[] buffer;
+		int bufferPosition;
+		bool isClosed_;
+	}
 }
 
 /++
@@ -4893,6 +5576,8 @@ class WritableStream {
 	from a function generating the data on demand (including an input range), from memory, or from a synchronous file.
 
 	A stream of heterogeneous types is compatible with input ranges.
+
+	It reads binary data.
 +/
 class ReadableStream {
 
@@ -4900,9 +5585,22 @@ class ReadableStream {
 
 	}
 
-	T get(T)(ByteOrder byteOrder = ByteOrder.irrelevant) {
+	/++
+		Gets data of the specified type `T` off the stream. The byte order of the T on the stream must be specified unless it is irrelevant (e.g. single byte entries).
+
+		---
+		// get an int out of a big endian stream
+		int i = stream.get!int(ByteOrder.bigEndian);
+
+		// get i bytes off the stream
+		ubyte[] data = stream.get!(ubyte[])(i);
+		---
+	+/
+	final T get(T)(ByteOrder byteOrder = ByteOrder.irrelevant, string file = __FILE__, size_t line = __LINE__) {
 		if(byteOrder == ByteOrder.irrelevant && T.sizeof > 1)
-			throw new ArsdException!"byte order must be specified for a type that is bigger than one byte";
+			throw new InvalidArgumentsException("byteOrder", "byte order must be specified for type " ~ T.stringof ~ " because it is bigger than one byte", "ReadableStream.get", file, line);
+
+		// FIXME: what if it is a struct?
 
 		while(bufferedLength() < T.sizeof)
 			waitForAdditionalData();
@@ -4939,26 +5637,37 @@ class ReadableStream {
 		}
 	}
 
-	// if the stream is closed before getting the length or the terminator, should we send partial stuff
-	// or just throw?
-	T get(T : E[], E)(size_t length, ByteOrder elementByteOrder = ByteOrder.irrelevant) {
-		if(byteOrder == ByteOrder.irrelevant && E.sizeof > 1)
-			throw new ArsdException!"byte order must be specified for a type that is bigger than one byte";
+	/// ditto
+	final T get(T : E[], E)(size_t length, ByteOrder elementByteOrder = ByteOrder.irrelevant, string file = __FILE__, size_t line = __LINE__) {
+		if(elementByteOrder == ByteOrder.irrelevant && E.sizeof > 1)
+			throw new InvalidArgumentsException("elementByteOrder", "byte order must be specified for type " ~ E.stringof ~ " because it is bigger than one byte", "ReadableStream.get", file, line);
+
+		// if the stream is closed before getting the length or the terminator, should we send partial stuff
+		// or just throw?
 
 		while(bufferedLength() < length * E.sizeof)
 			waitForAdditionalData();
 
 		T ret;
 
-		// FIXME
+		ret.length = length;
+
+		if(false && elementByteOrder == ByteOrder.irrelevant) {
+			// ret[] =
+			// FIXME: can prolly optimize
+		} else {
+			foreach(i; 0 .. length)
+				ret[i] = get!E(elementByteOrder);
+		}
 
 		return ret;
 
 	}
 
-	T get(T : E[], E)(scope bool delegate(E e) isTerminatingSentinel, ByteOrder elementByteOrder = ByteOrder.irrelevant) {
+	/// ditto
+	final T get(T : E[], E)(scope bool delegate(E e) isTerminatingSentinel, ByteOrder elementByteOrder = ByteOrder.irrelevant, string file = __FILE__, size_t line = __LINE__) {
 		if(byteOrder == ByteOrder.irrelevant && E.sizeof > 1)
-			throw new ArsdException!"byte order must be specified for a type that is bigger than one byte";
+			throw new InvalidArgumentsException("elementByteOrder", "byte order must be specified for type " ~ E.stringof ~ " because it is bigger than one byte", "ReadableStream.get", file, line);
 
 		assert(0, "Not implemented");
 	}
@@ -5037,6 +5746,8 @@ class ReadableStream {
 	}
 }
 
+// FIXME: do a stringstream too
+
 unittest {
 	auto stream = new ReadableStream();
 
@@ -5051,6 +5762,9 @@ unittest {
 		ubyte b = stream.get!ubyte;
 		assert(b == 33);
 		position = 3;
+
+		// ubyte[] c = stream.get!(ubyte[])(3);
+		// int[] d = stream.get!(int[])(3);
 	});
 
 	fiber.call();
@@ -5059,9 +5773,14 @@ unittest {
 	assert(position == 2);
 	stream.feedData([33]);
 	assert(position == 3);
+
+	// stream.feedData([1,2,3]);
+	// stream.feedData([1,2,3,4,1,2,3,4,1,2,3,4]);
 }
 
 /++
+	UNSTABLE, NOT FULLY IMPLEMENTED. DO NOT USE YET.
+
 	You might use this like:
 
 	---
@@ -5084,11 +5803,12 @@ unittest {
 	proc.start();
 	---
 
-	Please note that this does not currently and I have no plans as of this writing to add support for any kind of direct file descriptor passing. It always pipes them back to the parent for processing. If you don't want this, call the lower level functions yourself; the reason this class is here is to aid integration in the arsd.core event loop.
+	Please note that this does not currently and I have no plans as of this writing to add support for any kind of direct file descriptor passing. It always pipes them back to the parent for processing. If you don't want this, call the lower level functions yourself; the reason this class is here is to aid integration in the arsd.core event loop. Of course, I might change my mind on this.
 
-	Of course, I might change my mind on this.
+	Bugs:
+		Not implemented at all on Windows yet.
 +/
-class ExternalProcess {
+class ExternalProcess /*: AsyncOperationRequest*/ {
 
 	private static version(Posix) {
 		__gshared ExternalProcess[pid_t] activeChildren;
@@ -5120,12 +5840,14 @@ class ExternalProcess {
 		version(Posix) {
 			assert(0, "not implemented command line to posix args yet");
 		}
+		else throw new NotYetImplementedException();
 	}
 
 	this(string commandLine) {
 		version(Posix) {
 			assert(0, "not implemented command line to posix args yet");
 		}
+		else throw new NotYetImplementedException();
 	}
 
 	this(string[] args) {
@@ -5133,7 +5855,7 @@ class ExternalProcess {
 			this.program = FilePath(args[0]);
 			this.args = args;
 		}
-
+		else throw new NotYetImplementedException();
 	}
 
 	/++
@@ -5144,6 +5866,7 @@ class ExternalProcess {
 			this.program = program;
 			this.args = args;
 		}
+		else throw new NotYetImplementedException();
 	}
 
 	// you can modify these before calling start
@@ -5316,6 +6039,7 @@ class ExternalProcess {
 				// also need to listen to SIGCHLD to queue up the terminated callback. FIXME
 
 				stdoutUnregisterToken = getThisThreadEventLoop().addCallbackOnFdReadable(stdoutFd, new CallbackHelper(&stdoutReadable));
+				stderrUnregisterToken = getThisThreadEventLoop().addCallbackOnFdReadable(stderrFd, new CallbackHelper(&stderrReadable));
 			}
 		}
 	}
@@ -5329,6 +6053,7 @@ class ExternalProcess {
 		int stderrFd = -1;
 
 		ICoreEventLoop.UnregisterToken stdoutUnregisterToken;
+		ICoreEventLoop.UnregisterToken stderrUnregisterToken;
 
 		pid_t pid = -1;
 
@@ -5338,12 +6063,13 @@ class ExternalProcess {
 		string[] args;
 
 		void stdoutReadable() {
-			ubyte[1024] buffer;
-			auto ret = read(stdoutFd, buffer.ptr, buffer.length);
+			if(stdoutReadBuffer is null)
+				stdoutReadBuffer = new ubyte[](stdoutBufferSize);
+			auto ret = read(stdoutFd, stdoutReadBuffer.ptr, stdoutReadBuffer.length);
 			if(ret == -1)
 				throw new ErrnoApiException("read", errno);
 			if(onStdoutAvailable) {
-				onStdoutAvailable(buffer[0 .. ret]);
+				onStdoutAvailable(stdoutReadBuffer[0 .. ret]);
 			}
 
 			if(ret == 0) {
@@ -5353,7 +6079,28 @@ class ExternalProcess {
 				stdoutFd = -1;
 			}
 		}
+
+		void stderrReadable() {
+			if(stderrReadBuffer is null)
+				stderrReadBuffer = new ubyte[](stderrBufferSize);
+			auto ret = read(stderrFd, stderrReadBuffer.ptr, stderrReadBuffer.length);
+			if(ret == -1)
+				throw new ErrnoApiException("read", errno);
+			if(onStderrAvailable) {
+				onStderrAvailable(stderrReadBuffer[0 .. ret]);
+			}
+
+			if(ret == 0) {
+				stderrUnregisterToken.unregister();
+
+				close(stderrFd);
+				stderrFd = -1;
+			}
+		}
 	}
+
+	private ubyte[] stdoutReadBuffer;
+	private ubyte[] stderrReadBuffer;
 
 	void waitForCompletion() {
 		getThisThreadEventLoop().run(&this.isComplete);
@@ -5422,22 +6169,6 @@ unittest {
 
 	static int received;
 
-	static void tester() {
-		received++;
-		//writeln(cast(void*) Thread.getThis, " ", received);
-	}
-
-	foreach(ref thread; pool) {
-		thread = new Thread(() {
-			getThisThreadEventLoop().run(() {
-				return shouldExit;
-			});
-		});
-		thread.start();
-	}
-
-
-
 	proc.writeToStdin("hello!");
 	proc.writeToStdin(null); // closes the pipe
 
@@ -5446,6 +6177,8 @@ unittest {
 	assert(proc.status == 0);
 
 	assert(c == 2);
+
+	// writeln("here");
 }
 +/
 
@@ -5479,33 +6212,53 @@ unittest {
 	=================
 +/
 
+private void appendToBuffer(ref char[] buffer, ref int pos, scope const(char)[] what) {
+	auto required = pos + what.length;
+	if(buffer.length < required)
+		buffer.length = required;
+	buffer[pos .. pos + what.length] = what[];
+	pos += what.length;
+}
+
+private void appendToBuffer(ref char[] buffer, ref int pos, long what) {
+	if(buffer.length < pos + 16)
+		buffer.length = pos + 16;
+	auto sliced = intToString(what, buffer[pos .. $]);
+	pos += sliced.length;
+}
+
 /++
-	A `writeln` that actually works.
+	A `writeln` that actually works, at least for some basic types.
 
 	It works correctly on Windows, using the correct functions to write unicode to the console.  even allocating a console if needed. If the output has been redirected to a file or pipe, it writes UTF-8.
 
-	This always does text. See also WritableStream and WritableTextStream
+	This always does text. See also WritableStream and WritableTextStream when they are implemented.
 +/
 void writeln(T...)(T t) {
 	char[256] bufferBacking;
 	char[] buffer = bufferBacking[];
 	int pos;
+
 	foreach(arg; t) {
 		static if(is(typeof(arg) : const char[])) {
-			buffer[pos .. pos + arg.length] = arg[];
-			pos += arg.length;
+			appendToBuffer(buffer, pos, arg);
 		} else static if(is(typeof(arg) : stringz)) {
-			auto b = arg.borrow;
-			buffer[pos .. pos + b.length] = b[];
-			pos += b.length;
+			appendToBuffer(buffer, pos, arg.borrow);
 		} else static if(is(typeof(arg) : long)) {
-			auto sliced = intToString(arg, buffer[pos .. $]);
-			pos += sliced.length;
-		} else static assert(0, "Unsupported type: " ~ T.stringof);
+			appendToBuffer(buffer, pos, arg);
+		} else static if(is(typeof(arg.toString()) : const char[])) {
+			appendToBuffer(buffer, pos, arg.toString());
+		} else {
+			appendToBuffer(buffer, pos, "<" ~ typeof(arg).stringof ~ ">");
+		}
 	}
 
-	buffer[pos++] = '\n';
+	appendToBuffer(buffer, pos, "\n");
 
+	actuallyWriteToStdout(buffer[0 .. pos]);
+}
+
+private void actuallyWriteToStdout(scope char[] buffer) @trusted {
 	version(Windows) {
 		import core.sys.windows.wincon;
 
@@ -5517,17 +6270,17 @@ void writeln(T...)(T t) {
 
 		if(GetFileType(hStdOut) == FILE_TYPE_CHAR) {
 			wchar[256] wbuffer;
-			auto toWrite = makeWindowsString(buffer[0 .. pos], wbuffer, WindowsStringConversionFlags.convertNewLines);
+			auto toWrite = makeWindowsString(buffer, wbuffer, WindowsStringConversionFlags.convertNewLines);
 
 			DWORD written;
 			WriteConsoleW(hStdOut, toWrite.ptr, cast(DWORD) toWrite.length, &written, null);
 		} else {
 			DWORD written;
-			WriteFile(hStdOut, buffer.ptr, pos, &written, null);
+			WriteFile(hStdOut, buffer.ptr, cast(DWORD) buffer.length, &written, null);
 		}
 	} else {
 		import unix = core.sys.posix.unistd;
-		unix.write(1, buffer.ptr, pos);
+		unix.write(1, buffer.ptr, buffer.length);
 	}
 }
 
@@ -5904,7 +6657,7 @@ so the end result is you keep the last ones. it wouldn't report errors if multip
 
 +/
 
-private version(Windows) extern(Windows) {
+package(arsd) version(Windows) extern(Windows) {
 	BOOL CancelIoEx(HANDLE, LPOVERLAPPED);
 
 	struct WSABUF {
@@ -5922,4 +6675,537 @@ private version(Windows) extern(Windows) {
 
 	int WSARecv(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, LPOVERLAPPED, LPOVERLAPPED_COMPLETION_ROUTINE);
 	int WSARecvFrom(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr*, LPINT, LPOVERLAPPED, LPOVERLAPPED_COMPLETION_ROUTINE);
+}
+
+package(arsd) version(OSXCocoa) {
+
+/+
+To let Cocoa know that you intend to use multiple threads, all you have to do is spawn a single thread using the NSThread class and let that thread immediately exit. Your thread entry point need not do anything. Just the act of spawning a thread using NSThread is enough to ensure that the locks needed by the Cocoa frameworks are put in place.
+
+If you are not sure if Cocoa thinks your application is multithreaded or not, you can use the isMultiThreaded method of NSThread to check.
++/
+
+
+	struct DeifiedNSString {
+		char[16] sso;
+		const(char)[] str;
+
+		this(NSString s) {
+			auto len = s.length;
+			if(len <= sso.length / 4)
+				str = sso[];
+			else
+				str = new char[](len * 4);
+
+			NSUInteger count;
+			NSRange leftover;
+			auto ret = s.getBytes(cast(char*) str.ptr, str.length, &count, NSStringEncoding.NSUTF8StringEncoding, NSStringEncodingConversionOptions.none, NSRange(0, len), &leftover);
+			if(ret)
+				str = str[0 .. count];
+			else
+				throw new Exception("uh oh");
+		}
+	}
+
+	extern (Objective-C) {
+		import core.attribute; // : selector, optional;
+
+		alias NSUInteger = size_t;
+		alias NSInteger = ptrdiff_t;
+		alias unichar = wchar;
+		struct SEL_;
+		alias SEL_* SEL;
+		// this is called plain `id` in objective C but i fear mistakes with that in D. like sure it is a type instead of a variable like most things called id but i still think it is weird. i might change my mind later.
+		alias void* NSid; // FIXME? the docs say this is a pointer to an instance of a class, but that is not necessary a child of NSObject
+
+		extern class NSObject {
+			static NSObject alloc() @selector("alloc");
+			NSObject init() @selector("init");
+
+			void retain() @selector("retain");
+			void release() @selector("release");
+			void autorelease() @selector("autorelease");
+
+			void performSelectorOnMainThread(SEL aSelector, NSid arg, bool waitUntilDone) @selector("performSelectorOnMainThread:withObject:waitUntilDone:");
+		}
+
+		// this is some kind of generic in objc...
+		extern class NSArray : NSObject {
+			static NSArray arrayWithObjects(NSid* objects, NSUInteger count) @selector("arrayWithObjects:count:");
+		}
+
+		extern class NSString : NSObject {
+			override static NSString alloc() @selector("alloc");
+			override NSString init() @selector("init");
+
+			NSString initWithUTF8String(const scope char* str) @selector("initWithUTF8String:");
+
+			NSString initWithBytes(
+				const(ubyte)* bytes,
+				NSUInteger length,
+				NSStringEncoding encoding
+			) @selector("initWithBytes:length:encoding:");
+
+			unichar characterAtIndex(NSUInteger index) @selector("characterAtIndex:");
+			NSUInteger length() @selector("length");
+			const char* UTF8String() @selector("UTF8String");
+
+			void getCharacters(wchar* buffer, NSRange range) @selector("getCharacters:range:");
+
+			bool getBytes(void* buffer, NSUInteger maxBufferCount, NSUInteger* usedBufferCount, NSStringEncoding encoding, NSStringEncodingConversionOptions options, NSRange range, NSRange* leftover) @selector("getBytes:maxLength:usedLength:encoding:options:range:remainingRange:");
+		}
+
+		struct NSRange {
+			NSUInteger loc;
+			NSUInteger len;
+		}
+
+		enum NSStringEncodingConversionOptions : NSInteger {
+			none = 0,
+			NSAllowLossyEncodingConversion = 1,
+			NSExternalRepresentationEncodingConversion = 2
+		}
+
+		enum NSEventType {
+			idk
+
+		}
+
+		enum NSEventModifierFlags : NSUInteger {
+			NSEventModifierFlagCapsLock = 1 << 16,
+			NSEventModifierFlagShift = 1 << 17,
+			NSEventModifierFlagControl = 1 << 18,
+			NSEventModifierFlagOption = 1 << 19, // aka Alt
+			NSEventModifierFlagCommand = 1 << 20, // aka super
+			NSEventModifierFlagNumericPad = 1 << 21,
+			NSEventModifierFlagHelp = 1 << 22,
+			NSEventModifierFlagFunction = 1 << 23,
+			NSEventModifierFlagDeviceIndependentFlagsMask = 0xffff0000UL
+		}
+
+		extern class NSEvent : NSObject {
+			NSEventType type() @selector("type");
+
+			NSPoint locationInWindow() @selector("locationInWindow");
+			NSTimeInterval timestamp() @selector("timestamp");
+			NSWindow window() @selector("window"); // note: nullable
+			NSEventModifierFlags modifierFlags() @selector("modifierFlags");
+
+			NSString characters() @selector("characters");
+			NSString charactersIgnoringModifiers() @selector("charactersIgnoringModifiers");
+			ushort keyCode() @selector("keyCode");
+			ushort specialKey() @selector("specialKey");
+
+			static NSUInteger pressedMouseButtons() @selector("pressedMouseButtons");
+			NSPoint locationInWindow() @selector("locationInWindow"); // in screen coordinates
+			static NSPoint mouseLocation() @selector("mouseLocation"); // in screen coordinates
+			NSInteger buttonNumber() @selector("buttonNumber");
+
+			CGFloat deltaX() @selector("deltaX");
+			CGFloat deltaY() @selector("deltaY");
+			CGFloat deltaZ() @selector("deltaZ");
+
+			bool hasPreciseScrollingDeltas() @selector("hasPreciseScrollingDeltas");
+
+			CGFloat scrollingDeltaX() @selector("scrollingDeltaX");
+			CGFloat scrollingDeltaY() @selector("scrollingDeltaY");
+
+			// @property(getter=isDirectionInvertedFromDevice, readonly) BOOL directionInvertedFromDevice;
+		}
+
+		extern /* final */ class NSTimer : NSObject { // the docs say don't subclass this, but making it final breaks the bridge
+			override static NSTimer alloc() @selector("alloc");
+			override NSTimer init() @selector("init");
+
+			static NSTimer schedule(NSTimeInterval timeIntervalInSeconds, NSid target, SEL selector, NSid userInfo, bool repeats) @selector("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:");
+
+			void fire() @selector("fire");
+			void invalidate() @selector("invalidate");
+
+			bool valid() @selector("isValid");
+			// @property(copy) NSDate *fireDate;
+			NSTimeInterval timeInterval() @selector("timeInterval");
+			NSid userInfo() @selector("userInfo");
+
+			NSTimeInterval tolerance() @selector("tolerance");
+			NSTimeInterval tolerance(NSTimeInterval) @selector("setTolerance:");
+		}
+
+		alias NSTimeInterval = double;
+
+		extern class NSResponder : NSObject {
+			NSMenu menu() @selector("menu");
+			void menu(NSMenu menu) @selector("setMenu:");
+
+			void keyDown(NSEvent event) @selector("keyDown:");
+			void keyUp(NSEvent event) @selector("keyUp:");
+
+			// - (void)interpretKeyEvents:(NSArray<NSEvent *> *)eventArray;
+
+			void mouseDown(NSEvent event) @selector("mouseDown:");
+			void mouseDragged(NSEvent event) @selector("mouseDragged:");
+			void mouseUp(NSEvent event) @selector("mouseUp:");
+			void mouseMoved(NSEvent event) @selector("mouseMoved:");
+			void mouseEntered(NSEvent event) @selector("mouseEntered:");
+			void mouseExited(NSEvent event) @selector("mouseExited:");
+
+			void rightMouseDown(NSEvent event) @selector("rightMouseDown:");
+			void rightMouseDragged(NSEvent event) @selector("rightMouseDragged:");
+			void rightMouseUp(NSEvent event) @selector("rightMouseUp:");
+
+			void otherMouseDown(NSEvent event) @selector("otherMouseDown:");
+			void otherMouseDragged(NSEvent event) @selector("otherMouseDragged:");
+			void otherMouseUp(NSEvent event) @selector("otherMouseUp:");
+
+			void scrollWheel(NSEvent event) @selector("scrollWheel:");
+
+			// touch events should also be here btw among others
+		}
+
+		extern class NSApplication : NSResponder {
+			static NSApplication shared_() @selector("sharedApplication");
+
+			NSApplicationDelegate delegate_() @selector("delegate");
+			void delegate_(NSApplicationDelegate) @selector("setDelegate:");
+
+			bool setActivationPolicy(NSApplicationActivationPolicy activationPolicy) @selector("setActivationPolicy:");
+
+			void activateIgnoringOtherApps(bool flag) @selector("activateIgnoringOtherApps:");
+
+			@property NSMenu mainMenu() @selector("mainMenu");
+			@property NSMenu mainMenu(NSMenu) @selector("setMainMenu:");
+
+			void run() @selector("run");
+
+			void terminate(void*) @selector("terminate:");
+		}
+
+		extern interface NSApplicationDelegate {
+			void applicationWillFinishLaunching(NSNotification notification) @selector("applicationWillFinishLaunching:");
+			void applicationDidFinishLaunching(NSNotification notification) @selector("applicationDidFinishLaunching:");
+			bool applicationShouldTerminateAfterLastWindowClosed(NSNotification notification) @selector("applicationShouldTerminateAfterLastWindowClosed:");
+		}
+
+		extern class NSNotification : NSObject {
+			@property NSid object() @selector("object");
+		}
+
+		enum NSApplicationActivationPolicy : ptrdiff_t {
+			/* The application is an ordinary app that appears in the Dock and may have a user interface.  This is the default for bundled apps, unless overridden in the Info.plist. */
+			regular,
+
+			/* The application does not appear in the Dock and does not have a menu bar, but it may be activated programmatically or by clicking on one of its windows.  This corresponds to LSUIElement=1 in the Info.plist. */
+			accessory,
+
+			/* The application does not appear in the Dock and may not create windows or be activated.  This corresponds to LSBackgroundOnly=1 in the Info.plist.  This is also the default for unbundled executables that do not have Info.plists. */
+			prohibited
+		}
+
+		extern class NSGraphicsContext : NSObject {
+			static NSGraphicsContext currentContext() @selector("currentContext");
+			NSGraphicsContext graphicsPort() @selector("graphicsPort");
+		}
+
+		extern class NSMenu : NSObject {
+			override static NSMenu alloc() @selector("alloc");
+
+			override NSMenu init() @selector("init");
+			NSMenu init(NSString title) @selector("initWithTitle:");
+
+			void setSubmenu(NSMenu menu, NSMenuItem item) @selector("setSubmenu:forItem:");
+			void addItem(NSMenuItem newItem) @selector("addItem:");
+
+			NSMenuItem addItem(
+				NSString title,
+				SEL selector,
+				NSString charCode
+			) @selector("addItemWithTitle:action:keyEquivalent:");
+		}
+
+		extern class NSMenuItem : NSObject {
+			override static NSMenuItem alloc() @selector("alloc");
+			override NSMenuItem init() @selector("init");
+
+			NSMenuItem init(
+				NSString title,
+				SEL selector,
+				NSString charCode
+			) @selector("initWithTitle:action:keyEquivalent:");
+
+			void enabled(bool) @selector("setEnabled:");
+
+			NSResponder target(NSResponder) @selector("setTarget:");
+		}
+
+		enum NSWindowStyleMask : size_t {
+			borderless = 0,
+			titled = 1 << 0,
+			closable = 1 << 1,
+			miniaturizable = 1 << 2,
+			resizable	= 1 << 3,
+
+			/* Specifies a window with textured background. Textured windows generally don't draw a top border line under the titlebar/toolbar. To get that line, use the NSUnifiedTitleAndToolbarWindowMask mask.
+			 */
+			texturedBackground = 1 << 8,
+
+			/* Specifies a window whose titlebar and toolbar have a unified look - that is, a continuous background. Under the titlebar and toolbar a horizontal separator line will appear.
+			 */
+			unifiedTitleAndToolbar = 1 << 12,
+
+			/* When set, the window will appear full screen. This mask is automatically toggled when toggleFullScreen: is called.
+			 */
+			fullScreen = 1 << 14,
+
+			/* If set, the contentView will consume the full size of the window; it can be combined with other window style masks, but is only respected for windows with a titlebar.
+			 Utilizing this mask opts-in to layer-backing. Utilize the contentLayoutRect or auto-layout contentLayoutGuide to layout views underneath the titlebar/toolbar area.
+			 */
+			fullSizeContentView = 1 << 15,
+
+			/* The following are only applicable for NSPanel (or a subclass thereof)
+			 */
+			utilityWindow			= 1 << 4,
+			docModalWindow		 = 1 << 6,
+			nonactivatingPanel		= 1 << 7, // Specifies that a panel that does not activate the owning application
+			hUDWindow = 1 << 13 // Specifies a heads up display panel
+		}
+
+		extern class NSWindow : NSObject {
+			override static NSWindow alloc() @selector("alloc");
+
+			override NSWindow init() @selector("init");
+
+			NSWindow initWithContentRect(
+				NSRect contentRect,
+				NSWindowStyleMask style,
+				NSBackingStoreType bufferingType,
+				bool flag
+			) @selector("initWithContentRect:styleMask:backing:defer:");
+
+			void makeKeyAndOrderFront(NSid sender) @selector("makeKeyAndOrderFront:");
+			NSView contentView() @selector("contentView");
+			void contentView(NSView view) @selector("setContentView:");
+			void orderFrontRegardless() @selector("orderFrontRegardless");
+			void center() @selector("center");
+
+			NSRect frame() @selector("frame");
+
+			NSRect contentRectForFrameRect(NSRect frameRect) @selector("contentRectForFrameRect:");
+
+			NSString title() @selector("title");
+			void title(NSString value) @selector("setTitle:");
+
+			void close() @selector("close");
+
+			NSWindowDelegate delegate_() @selector("delegate");
+			void delegate_(NSWindowDelegate) @selector("setDelegate:");
+
+			void setBackgroundColor(NSColor color) @selector("setBackgroundColor:");
+		}
+
+		extern interface NSWindowDelegate {
+			@optional:
+			void windowDidResize(NSNotification notification) @selector("windowDidResize:");
+
+			NSSize windowWillResize(NSWindow sender, NSSize frameSize) @selector("windowWillResize:toSize:");
+
+			void windowWillClose(NSNotification notification) @selector("windowWillClose:");
+		}
+
+		extern class NSView : NSResponder {
+			override NSView init() @selector("init");
+			NSView initWithFrame(NSRect frameRect) @selector("initWithFrame:");
+
+			void addSubview(NSView view) @selector("addSubview:");
+
+			bool wantsLayer() @selector("wantsLayer");
+			void wantsLayer(bool value) @selector("setWantsLayer:");
+
+			CALayer layer() @selector("layer");
+			void uiDelegate(NSObject) @selector("setUIDelegate:");
+
+			void drawRect(NSRect rect) @selector("drawRect:");
+			bool isFlipped() @selector("isFlipped");
+			bool acceptsFirstResponder() @selector("acceptsFirstResponder");
+			bool setNeedsDisplay(bool) @selector("setNeedsDisplay:");
+
+			// DO NOT USE: https://issues.dlang.org/show_bug.cgi?id=19017
+			// an asm { pop RAX; } after getting the struct can kinda hack around this but still
+			@property NSRect frame() @selector("frame");
+			@property NSRect frame(NSRect rect) @selector("setFrame:");
+
+			void setFrameSize(NSSize newSize) @selector("setFrameSize:");
+			void setFrameOrigin(NSPoint newOrigin) @selector("setFrameOrigin:");
+
+			void addSubview(NSView what) @selector("addSubview:");
+			void removeFromSuperview() @selector("removeFromSuperview:");
+		}
+
+		extern class NSFont : NSObject {
+			void set() @selector("set"); // sets it into the current graphics context
+			void setInContext(NSGraphicsContext context) @selector("setInContext:");
+
+			static NSFont fontWithName(NSString fontName, CGFloat fontSize) @selector("fontWithName:size:");
+			// fontWithDescriptor too
+			// fontWithName and matrix too
+			static NSFont systemFontOfSize(CGFloat fontSize) @selector("systemFontOfSize:");
+			// among others
+
+			@property CGFloat pointSize() @selector("pointSize");
+			@property bool isFixedPitch() @selector("isFixedPitch");
+			// fontDescriptor
+			@property NSString displayName() @selector("displayName");
+
+			@property CGFloat ascender() @selector("ascender");
+			@property CGFloat descender() @selector("descender"); // note it is negative
+			@property CGFloat capHeight() @selector("capHeight");
+			@property CGFloat leading() @selector("leading");
+			@property CGFloat xHeight() @selector("xHeight");
+			// among many more
+		}
+
+		extern class NSColor : NSObject {
+			override static NSColor alloc() @selector("alloc");
+			static NSColor redColor() @selector("redColor");
+			static NSColor whiteColor() @selector("whiteColor");
+
+			CGColorRef CGColor() @selector("CGColor");
+		}
+
+		extern class CALayer : NSObject {
+			CGFloat borderWidth() @selector("borderWidth");
+			void borderWidth(CGFloat value) @selector("setBorderWidth:");
+
+			CGColorRef borderColor() @selector("borderColor");
+			void borderColor(CGColorRef) @selector("setBorderColor:");
+		}
+
+
+		extern class NSViewController : NSObject {
+			NSView view() @selector("view");
+			void view(NSView view) @selector("setView:");
+		}
+
+		enum NSBackingStoreType : size_t {
+			retained = 0,
+			nonretained = 1,
+			buffered = 2
+		}
+
+		enum NSStringEncoding : NSUInteger {
+			NSASCIIStringEncoding = 1,		/* 0..127 only */
+			NSUTF8StringEncoding = 4,
+			NSUnicodeStringEncoding = 10,
+
+			NSUTF16StringEncoding = NSUnicodeStringEncoding,
+			NSUTF16BigEndianStringEncoding = 0x90000100,
+			NSUTF16LittleEndianStringEncoding = 0x94000100,
+			NSUTF32StringEncoding = 0x8c000100,
+			NSUTF32BigEndianStringEncoding = 0x98000100,
+			NSUTF32LittleEndianStringEncoding = 0x9c000100
+		}
+
+
+		struct CGColor;
+		alias CGColorRef = CGColor*;
+
+		// note on the watch os it is float, not double
+		alias CGFloat = double;
+
+		struct NSPoint {
+			CGFloat x;
+			CGFloat y;
+		}
+
+		struct NSSize {
+			CGFloat width;
+			CGFloat height;
+		}
+
+		struct NSRect {
+			NSPoint origin;
+			NSSize size;
+		}
+
+		alias NSPoint CGPoint;
+		alias NSSize CGSize;
+		alias NSRect CGRect;
+
+		pragma(inline, true) NSPoint NSMakePoint(CGFloat x, CGFloat y) {
+			NSPoint p;
+			p.x = x;
+			p.y = y;
+			return p;
+		}
+
+		pragma(inline, true) NSSize NSMakeSize(CGFloat w, CGFloat h) {
+			NSSize s;
+			s.width = w;
+			s.height = h;
+			return s;
+		}
+
+		pragma(inline, true) NSRect NSMakeRect(CGFloat x, CGFloat y, CGFloat w, CGFloat h) {
+			NSRect r;
+			r.origin.x = x;
+			r.origin.y = y;
+			r.size.width = w;
+			r.size.height = h;
+			return r;
+		}
+
+
+	}
+
+	// helper raii refcount object
+	struct MacString {
+		union {
+			// must be wrapped cuz of bug in dmd
+			// referencing an init symbol when it should
+			// just be null. but the union makes it work
+			NSString s;
+		}
+
+		// FIXME: if a string literal it would be kinda nice to use
+		// the other function. but meh
+
+		this(scope const char[] str) {
+			this.s = NSString.alloc.initWithBytes(
+				cast(const(ubyte)*) str.ptr,
+				str.length,
+				NSStringEncoding.NSUTF8StringEncoding
+			);
+		}
+
+		NSString borrow() {
+			return s;
+		}
+
+		this(this) {
+			if(s !is null)
+				s.retain();
+		}
+
+		~this() {
+			if(s !is null) {
+				s.release();
+				s = null;
+			}
+		}
+	}
+
+	extern(C) void NSLog(NSString, ...);
+	extern(C) SEL sel_registerName(const(char)* str);
+
+	extern (Objective-C) __gshared NSApplication NSApp_;
+
+	NSApplication NSApp() {
+		if(NSApp_ is null)
+			NSApp_ = NSApplication.shared_;
+		return NSApp_;
+	}
+
+	// hacks to work around compiler bug
+	extern(C) __gshared void* _D4arsd4core17NSGraphicsContext7__ClassZ = null;
+	extern(C) __gshared void* _D4arsd4core6NSView7__ClassZ = null;
+	extern(C) __gshared void* _D4arsd4core8NSWindow7__ClassZ = null;
 }
