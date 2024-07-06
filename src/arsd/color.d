@@ -720,6 +720,8 @@ void premultiplyBgra(ubyte[] bgra) pure @nogc @safe nothrow in { assert(bgra.len
 
 void unPremultiplyRgba(ubyte[] rgba) pure @nogc @safe nothrow in { assert(rgba.length == 4); } do {
 	auto a = rgba[3];
+	if(a == 0)
+		return;
 
 	rgba[0] = cast(ubyte)(rgba[0] * 255 / a);
 	rgba[1] = cast(ubyte)(rgba[1] * 255 / a);
@@ -1881,6 +1883,73 @@ struct Rectangle {
 
 		return tmp;
 	}
+}
+
+/++
+	A type to represent an angle, taking away ambiguity of if it wants degrees or radians.
+
+	---
+		Angle a = Angle.degrees(180);
+		Angle b = Angle.radians(3.14159);
+
+		// note there might be slight changes in precision due to internal conversions
+	---
+
+	History:
+		Added August 29, 2023 (dub v11.1)
++/
+struct Angle {
+	private enum PI = 3.14159265358979;
+	private float angle;
+
+	pure @nogc nothrow @safe:
+
+	private this(float angle) {
+		this.angle = angle;
+	}
+
+	/++
+
+	+/
+	float degrees() const {
+		return angle * 180.0 / PI;
+	}
+
+	/// ditto
+	static Angle degrees(float deg) {
+		return Angle(deg * PI / 180.0);
+	}
+
+	/// ditto
+	float radians() const {
+		return angle;
+	}
+
+	/// ditto
+	static Angle radians(float rad) {
+		return Angle(rad);
+	}
+
+	/++
+		The +, -, +=, and -= operators all work on the angles too.
+	+/
+	Angle opBinary(string op : "+")(const Angle rhs) const {
+		return Angle(this.angle + rhs.angle);
+	}
+	/// ditto
+	Angle opBinary(string op : "-")(const Angle rhs) const {
+		return Angle(this.angle + rhs.angle);
+	}
+	/// ditto
+	Angle opOpAssign(string op : "+")(const Angle rhs) {
+		return this.angle += rhs.angle;
+	}
+	/// ditto
+	Angle opOpAssign(string op : "-")(const Angle rhs) {
+		return this.angle -= rhs.angle;
+	}
+
+	// maybe sin, cos, tan but meh you can .radians on them too.
 }
 
 private int max(int a, int b) @nogc nothrow pure @safe {

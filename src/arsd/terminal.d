@@ -227,6 +227,8 @@ unittest {
 +/
 __gshared void delegate() nothrow @nogc sigIntExtension;
 
+static import arsd.core;
+
 import core.stdc.stdio;
 
 version(TerminalDirectToEmulator) {
@@ -318,7 +320,12 @@ version(TerminalDirectToEmulator) {
 }
 
 version(Windows)
-	import core.sys.windows.windows;
+{
+	import core.sys.windows.wincon;
+	import core.sys.windows.winnt;
+	import core.sys.windows.winbase;
+	import core.sys.windows.winuser;
+}
 
 version(Win32Console) {
 	private {
@@ -633,7 +640,7 @@ struct Terminal {
 							if(terminalInFamily("linux"))
 								writeStringRaw("\033[?0c");
 							else
-								writeStringRaw("\033[0 q");
+								writeStringRaw("\033[2 q"); // assuming non-blinking block are the desired default
 						break;
 						case TerminalCursor.insert:
 							if(terminalInFamily("linux"))
@@ -845,11 +852,11 @@ struct Terminal {
 			// almost always
 			if(t.indexOf("xterm") != -1)
 				t = "xterm";
-			if(t.indexOf("putty") != -1)
+			else if(t.indexOf("putty") != -1)
 				t = "xterm";
-			if(t.indexOf("tmux") != -1)
+			else if(t.indexOf("tmux") != -1)
 				t = "tmux";
-			if(t.indexOf("screen") != -1)
+			else if(t.indexOf("screen") != -1)
 				t = "screen";
 
 			termcapData = getTermcapDatabase(t);
@@ -1944,13 +1951,19 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		first to ask the terminal for its authoritative answer.
 	+/
 	@property int cursorX() {
+		if(cursorPositionDirty)
+			updateCursorPosition();
 		return _cursorX;
 	}
 
 	/// ditto
 	@property int cursorY() {
+		if(cursorPositionDirty)
+			updateCursorPosition();
 		return _cursorY;
 	}
+
+	private bool cursorPositionDirty = true;
 
 	private int _cursorX;
 	private int _cursorY;
@@ -2240,83 +2253,8 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 	}
 	+/
         void writePrintableString(const(char)[] s, ForceOption force = ForceOption.automatic) {
-                while(s.length > 0) {
-                        size_t index = 0;
-                        import std.utf;
-                        import std.uni;
-                        import std.range;
-                        bool written=false;
-                        loop:
-                        foreach(g; s.byDchar.byGrapheme) {
-                                index += g[].byChar.walkLength;
-                                if(uncertainIfAtEndOfLine) {
-                                        uncertainIfAtEndOfLine = false;
-                                        writePrintableString_(s[0..index],force);
-                                        written = true;
-                                        updateCursorPosition();
-                                        break;
-                                }
-                                if(willInsertFollowingLine) {
-                                        willInsertFollowingLine = false;
-                                        _cursorX = 0;
-                                        _cursorY++;
-                                        if(_cursorY >= height) { _cursorY--; }
-                                }
-                                switch(g[0]) {
-                                        case '\n':
-                                                _cursorX = 0;
-                                                _cursorY++;
-                                                break;
-                                        case '\r':
-                                                _cursorX = 0;
-                                                break;
-                                        case '\t':
-                                                // FIXME: get the actual tabstop, if possible
-                                                int diff = 8 - (_cursorX % 8);
-                                                if(diff == 0)
-                                                        diff = 8;
-                                                _cursorX += diff;
-                                                break;
-                                        default:
-                                                if(auto ptr = g in graphemeWidth) {
-                                                        _cursorX += *ptr;
-
-                                                        if(_wrapAround) {
-                                                                if(_cursorX == width) {
-                                                                        _cursorX--;
-                                                                        willInsertFollowingLine = true;
-                                                                }
-                                                                else if(cursorX > width) {
-                                                                        _cursorX = *ptr;
-                                                                        _cursorY++;
-                                                                        if(_cursorY == height)
-                                                                                _cursorY--;
-                                                                }
-                                                        }
-
-                                                }
-                                                else {
-                                                        int x = _cursorX;
-                                                        int y = _cursorY;
-                                                        writePrintableString_(s[0..index],force);
-                                                        written = true;
-                                                        updateCursorPosition();
-                                                        //FIXME: At some point it might be worthwhile to check if the next wrtie will wrap on those terminals that support it
-                                                        //Note that: tmux (and screen?) seem to signal that the next write will wrap by reporting cursorX==width
-                                                        if (_cursorX+1< width || _cursorX == width)  {
-                                                                graphemeWidth[g] = _cursorY > y
-                                                                        ? _cursorX
-                                                                        : _cursorX - x;
-                                                                if(_cursorX == width) { willInsertFollowingLine = true; }
-                                                        }
-                                                        else { uncertainIfAtEndOfLine = true; }
-                                                        break loop;
-                                                }
-                                }
-                        }
-                        if(!written) { writePrintableString_(s[0..index],force); }
-                        s = s[index..$];
-                }
+		writePrintableString_(s, force);
+		cursorPositionDirty = true;
         }
 
 	void writePrintableString_(const(char)[] s, ForceOption force = ForceOption.automatic) {
@@ -2537,6 +2475,7 @@ http://msdn.microsoft.com/en-us/library/windows/desktop/ms683193%28v=vs.85%29.as
 		auto terminal = &this;
 
 		terminal.flush();
+		cursorPositionDirty = false;
 
 		// then get the current cursor position to start fresh
 		version(TerminalDirectToEmulator) {
@@ -2853,16 +2792,20 @@ struct RealTimeConsoleInput {
 			n.c_lflag &= ~f;
 			tcsetattr(fdIn, TCSANOW, &n);
 
-			// ensure these are still blocking after the resumption
+			// ensure these are still appropriately blocking after the resumption
 			import core.sys.posix.fcntl;
 			if(fdIn != -1) {
 				auto ctl = fcntl(fdIn, F_GETFL);
 				ctl &= ~O_NONBLOCK;
+				if(arsd.core.inSchedulableTask)
+					ctl |= O_NONBLOCK;
 				fcntl(fdIn, F_SETFL, ctl);
 			}
 			if(fdOut != -1) {
 				auto ctl = fcntl(fdOut, F_GETFL);
 				ctl &= ~O_NONBLOCK;
+				if(arsd.core.inSchedulableTask)
+					ctl |= O_NONBLOCK;
 				fcntl(fdOut, F_SETFL, ctl);
 			}
 		}
@@ -3039,11 +2982,15 @@ struct RealTimeConsoleInput {
 		{
 			auto ctl = fcntl(fdIn, F_GETFL);
 			ctl &= ~O_NONBLOCK;
+			if(arsd.core.inSchedulableTask)
+				ctl |= O_NONBLOCK;
 			fcntl(fdIn, F_SETFL, ctl);
 		}
 		{
 			auto ctl = fcntl(fdOut, F_GETFL);
 			ctl &= ~O_NONBLOCK;
+			if(arsd.core.inSchedulableTask)
+				ctl |= O_NONBLOCK;
 			fcntl(fdOut, F_SETFL, ctl);
 		}
 
@@ -3372,11 +3319,17 @@ struct RealTimeConsoleInput {
 					else
 						goto try_again;
 				} else if(errno == EAGAIN || errno == EWOULDBLOCK) {
-					// I turn off O_NONBLOCK explicitly in setup, but
+					// I turn off O_NONBLOCK explicitly in setup unless in a schedulable task, but
 					// still just in case, let's keep this working too
-					import core.thread;
-					Thread.sleep(1.msecs);
-					goto try_again;
+
+					if(auto controls = arsd.core.inSchedulableTask) {
+						controls.yieldUntilReadable(fdIn);
+						goto try_again;
+					} else {
+						import core.thread;
+						Thread.sleep(1.msecs);
+						goto try_again;
+					}
 				} else {
 					import std.conv;
 					throw new Exception("read failed " ~ to!string(errno));
@@ -3588,10 +3541,21 @@ struct RealTimeConsoleInput {
 
 		INPUT_RECORD[32] buffer;
 		DWORD actuallyRead;
-		auto success = ReadConsoleInputW(inputHandle, buffer.ptr, buffer.length, &actuallyRead);
+
+		if(auto controls = arsd.core.inSchedulableTask) {
+			if(PeekConsoleInputW(inputHandle, buffer.ptr, 1, &actuallyRead) == 0)
+				throw new Exception("PeekConsoleInputW");
+
+			if(actuallyRead == 0) {
+				// the next call would block, we need to wait on the handle
+				controls.yieldUntilSignaled(inputHandle);
+			}
+		}
+
+		if(ReadConsoleInputW(inputHandle, buffer.ptr, buffer.length, &actuallyRead) == 0) {
 		//import std.stdio; writeln(buffer[0 .. actuallyRead][0].KeyEvent, cast(int) buffer[0].KeyEvent.UnicodeChar);
-		if(success == 0)
 			throw new Exception("ReadConsoleInput");
+		}
 
 		InputEvent[] newEvents;
 		input_loop: foreach(record; buffer[0 .. actuallyRead]) {
@@ -4193,25 +4157,8 @@ struct RealTimeConsoleInput {
 			}
 			// escape sequence
 			c = nextRaw();
-			if(c == '[') { // CSI, ends on anything >= 'A'
+			if(c == '[' || c == 'O') { // CSI, ends on anything >= 'A'
 				return doEscapeSequence(readEscapeSequence(sequenceBuffer));
-			} else if(c == 'O') {
-				// could be xterm function key
-				auto n = nextRaw();
-
-				char[3] thing;
-				thing[0] = '\033';
-				thing[1] = 'O';
-				thing[2] = cast(char) n;
-
-				auto cap = terminal.findSequenceInTermcap(thing);
-				if(cap is null) {
-					return keyPressAndRelease(NonCharacterKeyEvent.Key.escape) ~
-						charPressAndRelease('O') ~
-						charPressAndRelease(thing[2]);
-				} else {
-					return translateTermcapName(cap);
-				}
 			} else if(c == '\033') {
 				// could be escape followed by an escape sequence!
 				return keyPressAndRelease(NonCharacterKeyEvent.Key.escape) ~ readNextEventsHelper(c);
@@ -8490,7 +8437,9 @@ version(TerminalDirectToEmulator) {
 			//pthread_cancel(widget.term.threadId);
 			//widget.term = null;
 		} else version(Windows) {
-			import core.sys.windows.windows;
+			import core.sys.windows.winbase;
+			import core.sys.windows.winnt;
+
 			auto hnd = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, TRUE, GetCurrentProcessId());
 			TerminateProcess(hnd, -1);
 			assert(0);
@@ -8821,7 +8770,6 @@ version(TerminalDirectToEmulator) {
 
 						_dup2(_fileno(stdout), _fileno(stderr));
 						setvbuf(stderr, null, _IOLBF, 128); // if I don't unbuffer this it can really confuse things
-						assert(0);
 					}
 
 					WindowsRead(0, 0, this.overlapped);
@@ -9490,7 +9438,8 @@ void main() {
 
 private version(Windows) {
 	pragma(lib, "user32");
-	import core.sys.windows.windows;
+	import core.sys.windows.winbase;
+	import core.sys.windows.winnt;
 
 	extern(Windows)
 	HANDLE CreateNamedPipeA(
