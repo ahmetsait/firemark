@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if pushd sqlite3 > /dev/null; then
+	./build.sh || exit 1 && \
+	popd > /dev/null
+fi
+
 config="debug"
 platform="linux"
 arch="x86_64"
@@ -28,5 +33,5 @@ else
 fi
 
 if [[ "$outdated" == true ]]; then
-	dmd -i -g -debug -m64 -w -vcolumns -preview=dip25 -preview=dip1000 -preview=dip1008 -preview=fieldwise -preview=fixAliasThis -preview=rvaluerefparam -preview=in -preview=inclusiveincontracts -preview=shortenedMethods "sqlite3/sqlite3.o" -J"$sourceDir" -I"$sourceDir" "$mainSource" -of"$outputFile"
+	dmd -i -g -debug -m64 -w -vcolumns -preview=dip1000 -preview=dip1008 -preview=fieldwise -preview=fixAliasThis -preview=rvaluerefparam -preview=inclusiveincontracts "sqlite3/sqlite3.o" -J"$sourceDir" -I"$sourceDir" "$mainSource" -of"$outputFile"
 fi

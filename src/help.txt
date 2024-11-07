@@ -8,6 +8,10 @@ Usage:
 Options:
     -p, --profile=PATH
         Path to profile folder where 'favicons.sqlite' and 'places.sqlite' exists.
+    -b, --backup
+        Backup 'favicons.sqlite'. (Default)
+    -B, --no-backup
+        Don't backup 'favicons.sqlite'.
     -e, --erase
         Erase favicon table before proceeding.
     -f, --force

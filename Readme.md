@@ -2,15 +2,13 @@
 
 ![Firemark Icon](icon.svg)  
 Firemark  
-[![Platforms](https://img.shields.io/badge/platform-windows%20%7C%20linux-blue)](https://github.com/ahmetsait/firemark/releases) [![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark)](https://github.com/ahmetsait/firemark/releases) [![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total)](https://github.com/ahmetsait/firemark/releases) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
+[![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20linux-blue)](https://github.com/ahmetsait/firemark/releases) [![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark)](https://github.com/ahmetsait/firemark/releases/latest) [![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total)](https://github.com/ahmetsait/firemark/releases) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
 ========
 </div>
 
-Firemark is a command line program for downloading missing Firefox bookmark icons. It works by retrieving bookmarks from the given `places.sqlite` file and downloads missing favicons into the given `favicons.sqlite` file.
+Firemark is a command line program for downloading missing Firefox bookmark icons. It reads `places.sqlite` from the given profile directory and downloads missing favicons into `favicons.sqlite` in the same folder.
 
-**Backup your `*.sqlite` files before modifying them with Firemark.**
-
-Firemark can also be used as a helper utility for extracting favicon links from a given URL as an alternative to various online favicon retrieval services. See the `--extract` [option](#documentation).
+Firemark can also be used as a helper utility for extracting favicon links from a given URL as an alternative to various online favicon retrieval services. See the [`--extract` option](#documentation).
 
 Downloads
 ---------
@@ -18,44 +16,47 @@ Prebuilt binaries can be found in [Releases](https://github.com/ahmetsait/firema
 
 Getting Started
 ---------------
-Navigate to `about:support` in Firefox and copy the path from `Profile Directory` section and replace with `<Profile-Directory>` in the commands below. Press `Ctrl+C` to stop Firemark, it might take quite a while if it's waiting for a nonresponding server. You can press `Ctrl+C` 3 times to immediately shut it down.
+Navigate to `about:profiles` in Firefox and copy the `Root Directory` path from your default profile and replace `<Profile-Directory>` with it in the commands below. Press `Ctrl+C` to stop Firemark before it completes. You can also press `Ctrl+C` 3 times to immediately shut it down in case Firemark takes too long to respond.
 
-**Close all Firefox instances before using Firemark on the current `*.sqlite` files (files in the active profile directory).**
+**Close all Firefox instances before using Firemark on your profile directory.**
 
 ### Windows
 ```batch
-@REM Backup favicons.sqlite
-xcopy "<Profile-Directory>\favicons.sqlite" "<Profile-Directory>\favicons-backup.sqlite"
-.\firemark.exe --verbose --places "<Profile-Directory>\places.sqlite" --favicons "<Profile-Directory>\favicons.sqlite"
+.\firemark.exe --verbose --profile "<Profile-Directory>"
 ```
 
 ### Linux
 ```bash
-# Backup favicons.sqlite
-cp "<Profile-Directory>/favicons.sqlite" "<Profile-Directory>/favicons-backup.sqlite"
-./firemark --verbose --places "<Profile-Directory>/places.sqlite" --favicons "<Profile-Directory>/favicons.sqlite"
+./firemark --verbose --profile "<Profile-Directory>"
 ```
 
 Documentation
 -------------
 ### Usage
-`firemark [options] -f path/to/favicons.sqlite -p path/to/places.sqlite`  
-Downloads missing Firefox bookmark icons into 'favicons.sqlite'.
+`firemark [options] --profile path/to/profile-folder`  
+Downloads missing Firefox bookmark icons.
 
-`firemark [options] -x https://example.com`  
-Extract favicon URLs from web page with `link[rel~=icon]` selector to standard output.
+`firemark [options] --extract https://example.com`  
+Extract favicon URLs from web page with [`link[rel~=icon]` selector](https://developer.mozilla.org/en-US/docs/Web/CSS/Attribute_selectors) to standard output.
 
 ### Options
-- `-f` `--favicons`  
-  Path to `favicons.sqlite` file.
-- `-p` `--places`  
-  Path to `places.sqlite` file.
-- `-j` `--jobs`  
-  Number of concurrent jobs. Use it to speed up downloading process if you have too many bookmarks.  
-  Anything more than `-j 3` is not recommended since servers might block you out because of rate limiting.
-- `-x` `--extract`  
-  Extract favicon URLs from web page with `link[rel~=icon]` selector to standard output and exit.
-- `-v` `--verbose`  
+- `-p`, `--profile=PATH`  
+  Path to profile folder where `favicons.sqlite` and `places.sqlite` exists.
+- `-b`, `--backup`  
+  Backup `favicons.sqlite`. (Default)
+- `-B`, `--no-backup`  
+  Don't backup `favicons.sqlite`.
+- `-e`, `--erase`  
+  Erase favicon table before proceeding.
+- `-f`, `--force`  
+  Force downloading icons for all bookmarks instead of just missing ones.
+- `-j`, `--jobs=N`  
+  Number of concurrent jobs. Use it to speed up downloading favicons if you have too many bookmarks.  
+  Anything more than `-j 5` is not recommended since servers might block you out because of rate limiting.
+- `-x`, `--extract=URL`  
+  Extract favicon URLs from web page with [`link[rel~=icon]` selector](https://developer.mozilla.org/en-US/docs/Web/CSS/Attribute_selectors) to standard output and exit.  
+  This also includes the root `/favicon.ico` for convenience.
+- `-v`, `--verbose`  
   Print diagnostic messages.
 - `--version`  
   Output version information and exit.
@@ -64,10 +65,8 @@ Extract favicon URLs from web page with `link[rel~=icon]` selector to standard o
 
 Known Issues
 ------------
-- Firemark inserts the duplicate pages into moz_pages_w_icons table.
-- Some URLs take too long to timeout if the server does not respond.
-- Firemark might run out of file descriptors because of too many open connections.
-- Firemark inserts wrong `expire_ms` when there is no relevant info in response headers.
+- Firemark inserts duplicate pages into `moz_pages_w_icons` table.
+- Apparently some `icon_url` columns in `moz_icons` table end up with incomplete URLs such as `/favicon.ico`, `/assets/favicons/favicon.ico` or `/static/assets/favicon.ico?v=2`.
 
 See [Issues](https://github.com/ahmetsait/firemark/issues) for bug reports.
 
@@ -75,7 +74,7 @@ Building
 --------
 You don't strictly need a specific compiler but those listed in Prerequisites are the ones used in build scripts.
 Check out the `build.sh` & `build.ps1` files to learn more and tweak as you like.
-On Windows, you can also link against `sqlite3.lib` import library instead of the object file directly. In this case the compiled executable will depend on `sqlite3.dll`. See: [How to generate an import library (LIB-file) from a DLL?](https://stackoverflow.com/questions/9946322/how-to-generate-an-import-library-lib-file-from-a-dll).
+On Windows, you can also link against `sqlite3.lib` import library instead of the object file directly. In this case the compiled executable will depend on `sqlite3.dll`. See: [How to generate an import library (LIB-file) from a DLL?](https://stackoverflow.com/questions/9946322/how-to-generate-an-import-library-lib-file-from-a-dll)
 
 ### Windows
 Prerequisites:
@@ -84,9 +83,6 @@ Prerequisites:
 
 From PowerShell:
 ```powershell
-pushd sqlite3
-.\build.ps1
-popd
 .\build.ps1
 ```
 If you're getting "running scripts is disabled on this system" errors, execute the following:
@@ -102,7 +98,7 @@ Prerequisites:
 
 From Bash:
 ```bash
-pushd sqlite3 && ./build.sh && popd && ./build.sh
+./build.sh
 ```
 
 License

@@ -9,9 +9,9 @@
 			"windows": {
 				"target": "bin\\debug-windows-x86_64\\firemark.exe"
 			},
-			"cwd": "${workspaceRoot}",
+			"cwd": "${workspaceFolder}",
 			"valuesFormatting": "parseText",
-			"arguments": "-v"
+			"arguments": "-v -p ."
 		}
 	]
 }
