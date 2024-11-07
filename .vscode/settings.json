@@ -1,6 +1,6 @@
 {
-    "dscanner.ignoredKeys": [
-        "dscanner.style.long_line",
-        "dscanner.suspicious.label_var_same_name"
-    ]
+	"dscanner.ignoredKeys": [
+		"dscanner.style.long_line",
+		"dscanner.suspicious.label_var_same_name"
+	]
 }

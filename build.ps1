@@ -1,4 +1,11 @@
-﻿$config = "debug"
+﻿pushd sqlite3
+.\build.ps1
+if ($LastExitCode -ne 0) {
+	exit 1
+}
+popd
+
+$config = "debug"
 $platform = "windows"
 $arch = "x86_64"
 
@@ -31,6 +38,6 @@ else {
 }
 
 if ($outdated) {
-	dmd -i -g -debug -m64 -w -vcolumns -preview=dip25 -preview=dip1000 -preview=dip1008 -preview=fieldwise -preview=fixAliasThis -preview=rvaluerefparam -preview=in -preview=inclusiveincontracts -preview=shortenedMethods (Get-ChildItem "$libDir" -Filter "*.lib").FullName "sqlite3\sqlite3.obj" -J"$sourceDir" -I"$sourceDir" "$mainSource" -of"$outputFile"
+	dmd -i -g -debug -m64 -w -vcolumns -preview=dip1000 -preview=dip1008 -preview=fieldwise -preview=fixAliasThis -preview=rvaluerefparam -preview=inclusiveincontracts (Get-ChildItem "$libDir" -Filter "*.lib").FullName "sqlite3\sqlite3.obj" -J"$sourceDir" -I"$sourceDir" "$mainSource" -of"$outputFile"
 	Copy-Item (Get-ChildItem "$libDir" -Filter "*.dll").FullName -Destination "$outputDir"
 }

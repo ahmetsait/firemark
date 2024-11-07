@@ -13,7 +13,7 @@ import core.sys.windows.wincon;
 import arsd.png;
 import arsd.terminal;
 
-immutable userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0";
+immutable userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 immutable ubyte[] pngMagicBytes = [ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A ];
 
@@ -24,7 +24,7 @@ string normalizeFilename(const(char)[] filename)
 	
 	import core.stdc.stdio : FILENAME_MAX;
 	if (filename.length > FILENAME_MAX)
-		return filename[0 .. FILENAME_MAX].idup;
+		filename = filename[0 .. FILENAME_MAX];
 	
 	char[] result = filename.dup;
 	

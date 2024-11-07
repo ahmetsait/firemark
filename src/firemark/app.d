@@ -48,7 +48,7 @@ import firefox.hash;
 
 import firemark.util;
 
-immutable string versionString = "Firemark v0.1.0";
+immutable string versionString = "Firemark v0.2.0";
 
 immutable string helpString = import("help.txt");
 
@@ -66,12 +66,57 @@ void interruptHandler(int sig) nothrow @nogc
 		exit(sig);
 }
 
+struct Place
+{
+	long id;
+	string url;
+	ulong url_hash;
+}
+
+struct Favicon
+{
+	long id;
+	string icon_url;
+	long fixed_icon_url_hash;
+	long width;
+}
+
+version(none)
+void main(string[] args)
+{
+	try
+	{
+		Database db = Database("places.sqlite", SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX/+ | SQLITE_OPEN_EXCLUSIVE+/);
+		db.execute(`attach database ? as favicons`, "favicons.sqlite");
+		
+		string url = args[1];
+		
+		HttpClient client = new HttpClient();
+		client.userAgent = userAgent;
+		client.defaultTimeout = 5.seconds;
+		
+		HttpRequest request = client.request(Uri(url));
+		HttpResponse response = request.waitForCompletion();
+		writefln("%d %s\n%(%s\n%)", response.code, response.codeText, response.headers);
+	}
+	catch (Exception ex)
+	{
+		writeln(ex);
+	}
+}
+else
 int main(string[] args)
 {
-	string faviconsFilePath;
-	string placesFilePath;
-	int jobCount = 0; // 0 means we can only utilize the main thread with TaskPool.finish(true)
+	string profilePath;
+	bool forceReload = false;
+	bool backup = true;
+	void noBackup() { backup = false; }
+	bool eraseIcons = false;
+	int jobCount = 0;
+	// 0 means we can only utilize the main thread with TaskPool.finish(true)
+	
 	string extractUrl = null;
+	
 	bool verboseOutput = false;
 	bool showVersion = false;
 	
@@ -93,8 +138,12 @@ int main(string[] args)
 	try
 	{
 		opt = getopt(args,
-			"favicons|f", &faviconsFilePath,
-			"places|p", &placesFilePath,
+			std.getopt.config.caseSensitive,
+			"profile|p", &profilePath,
+			"force|f", &forceReload,
+			"backup|b", &backup,
+			"no-backup|B", &noBackup,
+			"erase|e", &eraseIcons,
 			"jobs|j", &jobCount,
 			"extract|x", &extractUrl,
 			"verbose|v", &verboseOutput,
@@ -110,13 +159,15 @@ int main(string[] args)
 	
 	if (opt.helpWanted)
 	{
-		write(helpString);
+		terminal.write(helpString);
+		terminal.flush();
 		return 0;
 	}
 	
 	if (showVersion)
 	{
-		writeln(versionString);
+		terminal.writeln(versionString);
+		terminal.flush();
 		return 0;
 	}
 	
@@ -164,166 +215,261 @@ int main(string[] args)
 		return 0;
 	}
 	
-	if (placesFilePath == null || faviconsFilePath == null)
+	if (profilePath == null)
 	{
-		stderr.writeln("firemark: Missing '--places' or '--favicons' arguments.");
+		stderr.writeln("firemark: Missing '--profile' argument.");
 		stderr.writeln("Try 'firemark --help' for more information.");
 		return 1;
 	}
 	
-	Mutex placesMutex = new Mutex();
-	Database places;
-	//Statement placesBookmarkCount;
-	Statement placesBookmarks;
-	try
-	{
-		places = Database(placesFilePath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX);
-		//placesBookmarkCount = places.prepare(`select count(*) from moz_bookmarks where moz_bookmarks.type = 1`);
-		placesBookmarks = places.prepare(`
-			select moz_places.id, moz_places.url, moz_places.url_hash
-			from moz_bookmarks
-			inner join moz_places on moz_bookmarks.fk=moz_places.id
-			where moz_bookmarks.type = 1`);
-	}
-	catch (SqliteException ex)
-	{
-		stderr.writefln("%s: %s", escapeShellFileName(placesFilePath), ex.msg);
-		return 1;
-	}
+	string placesFilePath = buildPath(profilePath, "places.sqlite");
+	string faviconsFilePath = buildPath(profilePath, "favicons.sqlite");
 	
-	Mutex faviconsMutex = new Mutex();
-	Database favicons;
-	try
+	if (backup)
 	{
-		favicons = Database(faviconsFilePath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX);
-		favicons.createFunction("fixup_url", &fixupURL);
-		favicons.createFunction("hash", &hashURL);
-	}
-	catch (SqliteException ex)
-	{
-		stderr.writefln("%s: %s", escapeShellFileName(faviconsFilePath), ex.msg);
-		return 1;
-	}
-	
-	ResultRange getFaviconsOfPage(string page_url, ulong page_url_hash)
-	{
-		synchronized (faviconsMutex)
+		immutable backupPath = findAvailableFilename(profilePath, "favicons-backup", ".sqlite");
+		std.file.copy(faviconsFilePath, backupPath);
+		if (verboseOutput)
 		{
-			return favicons.execute(`
-				select moz_icons.id, moz_icons.icon_url, moz_icons.fixed_icon_url_hash, moz_icons.width, moz_icons.root
-				from moz_pages_w_icons
-				inner join moz_icons_to_pages on moz_pages_w_icons.id = moz_icons_to_pages.page_id
-				inner join moz_icons on moz_icons_to_pages.icon_id = moz_icons.id
-				where moz_pages_w_icons.page_url_hash = ? and moz_pages_w_icons.page_url = ?`,
-				page_url_hash, page_url);
+			terminal.writefln("Backed up '%s' to '%s'", faviconsFilePath, backupPath);
+			terminal.flush();
 		}
 	}
 	
-	ResultRange getFaviconWithURL(string fixed_icon_url, ulong fixed_icon_url_hash, bool root)
+	Mutex dbMutex = new Mutex();
+	Database db;
+	try
 	{
-		synchronized (faviconsMutex)
+		db = Database(placesFilePath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_EXCLUSIVE | SQLITE_OPEN_FULLMUTEX);
+		db.execute(`attach database ? as favicons`, faviconsFilePath);
+		
+		if (verboseOutput)
 		{
-			return favicons.execute(`
-				select id, icon_url, fixed_icon_url_hash, width
-				from moz_icons
-				where fixed_icon_url_hash = ? and fixup_url(icon_url) = ? and root = ?`,
-				fixed_icon_url_hash, fixed_icon_url, root);
+			terminal.writeln("places.sqlite");
+			terminal.writeln("-------------");
+			terminal.writeln("auto_vacuum: ", db.execute(`pragma auto_vacuum`).oneValue!string);
+			terminal.writeln("automatic_index: ", db.execute(`pragma automatic_index`).oneValue!string);
+			terminal.writeln("checkpoint_fullfsync: ", db.execute(`pragma checkpoint_fullfsync`).oneValue!string);
+			terminal.writeln("foreign_keys: ", db.execute(`pragma foreign_keys`).oneValue!string);
+			terminal.writeln("fullfsync: ", db.execute(`pragma fullfsync`).oneValue!string);
+			terminal.writeln("ignore_check_constraints: ", db.execute(`pragma ignore_check_constraints`).oneValue!string);
+			terminal.writeln("journal_mode: ", db.execute(`pragma journal_mode`).oneValue!string);
+			terminal.writeln("journal_size_limit: ", db.execute(`pragma journal_size_limit`).oneValue!string);
+			terminal.writeln("locking_mode: ", db.execute(`pragma locking_mode`).oneValue!string);
+			terminal.writeln("max_page_count: ", db.execute(`pragma max_page_count`).oneValue!string);
+			terminal.writeln("page_size: ", db.execute(`pragma page_size`).oneValue!string);
+			terminal.writeln("recursive_triggers: ", db.execute(`pragma recursive_triggers`).oneValue!string);
+			terminal.writeln("secure_delete: ", db.execute(`pragma secure_delete`).oneValue!string);
+			terminal.writeln("synchronous: ", db.execute(`pragma synchronous`).oneValue!string);
+			terminal.writeln("temp_store: ", db.execute(`pragma temp_store`).oneValue!string);
+			terminal.writeln("user_version: ", db.execute(`pragma user_version`).oneValue!string);
+			terminal.writeln("wal_autocheckpoint: ", db.execute(`pragma wal_autocheckpoint`).oneValue!string);
+			terminal.writeln();
+			
+			terminal.writeln("favicons.sqlite");
+			terminal.writeln("-------------");
+			terminal.writeln("auto_vacuum: ", db.execute(`pragma favicons.auto_vacuum`).oneValue!string);
+			terminal.writeln("automatic_index: ", db.execute(`pragma favicons.automatic_index`).oneValue!string);
+			terminal.writeln("checkpoint_fullfsync: ", db.execute(`pragma favicons.checkpoint_fullfsync`).oneValue!string);
+			terminal.writeln("foreign_keys: ", db.execute(`pragma favicons.foreign_keys`).oneValue!string);
+			terminal.writeln("fullfsync: ", db.execute(`pragma favicons.fullfsync`).oneValue!string);
+			terminal.writeln("ignore_check_constraints: ", db.execute(`pragma favicons.ignore_check_constraints`).oneValue!string);
+			terminal.writeln("journal_mode: ", db.execute(`pragma favicons.journal_mode`).oneValue!string);
+			terminal.writeln("journal_size_limit: ", db.execute(`pragma favicons.journal_size_limit`).oneValue!string);
+			terminal.writeln("locking_mode: ", db.execute(`pragma favicons.locking_mode`).oneValue!string);
+			terminal.writeln("max_page_count: ", db.execute(`pragma favicons.max_page_count`).oneValue!string);
+			terminal.writeln("page_size: ", db.execute(`pragma favicons.page_size`).oneValue!string);
+			terminal.writeln("recursive_triggers: ", db.execute(`pragma favicons.recursive_triggers`).oneValue!string);
+			terminal.writeln("secure_delete: ", db.execute(`pragma favicons.secure_delete`).oneValue!string);
+			terminal.writeln("synchronous: ", db.execute(`pragma favicons.synchronous`).oneValue!string);
+			terminal.writeln("temp_store: ", db.execute(`pragma favicons.temp_store`).oneValue!string);
+			terminal.writeln("user_version: ", db.execute(`pragma favicons.user_version`).oneValue!string);
+			terminal.writeln("wal_autocheckpoint: ", db.execute(`pragma favicons.wal_autocheckpoint`).oneValue!string);
+			terminal.writeln();
+			terminal.flush();
 		}
+		
+		db.createFunction("fixup_url", &fixupURL);
+		db.createFunction("hash", &hashURL);
+		db.createFunction("root_favicon_url_of",
+			function string(string url) => Uri("/favicon.ico").basedOn(Uri(url)).toString()
+		);
+		
+		db.run(`
+			create temp table added_icons (
+				icon_id integer primary key
+			);
+			
+			create temp table added_icons_to_pages (
+				page_id integer,
+				icon_id integer,
+				primary key (page_id, icon_id)
+			);
+			
+			create temp table added_pages_w_icons (
+				page_id integer primary key
+			);
+			
+			create temp view bookmarks as
+			select moz_places.*
+			from moz_bookmarks, moz_places
+			where
+				moz_bookmarks.fk = moz_places.id
+				and moz_bookmarks.type = 1
+				and moz_places.url not like 'place:%';
+			
+			create temp view bookmarks_without_direct_icons as
+			select bookmarks.*
+			from bookmarks
+			where
+				not exists (
+					select *
+					from moz_pages_w_icons, moz_icons_to_pages, moz_icons
+					where
+						bookmarks.url_hash = moz_pages_w_icons.page_url_hash
+						and bookmarks.url = moz_pages_w_icons.page_url
+						and moz_pages_w_icons.id = moz_icons_to_pages.page_id
+						and moz_icons_to_pages.icon_id = moz_icons.id
+				);
+			
+			create temp view bookmarks_without_any_icons as
+			select bookmarks_without_direct_icons.*
+			from bookmarks_without_direct_icons
+			where
+				not exists (
+					select *
+					from moz_icons
+					where
+						moz_icons.fixed_icon_url_hash = hash(fixup_url(root_favicon_url_of(bookmarks_without_direct_icons.url)))
+						and moz_icons.icon_url = root_favicon_url_of(bookmarks_without_direct_icons.url)
+				);
+		`);
+	}
+	catch (SqliteException ex)
+	{
+		stderr.writefln("SQLite Exception\n%s", ex.msg);
+		return 1;
 	}
 	
-	CachedResults bookmarks = cached(placesBookmarks.execute());
-	immutable size_t total = bookmarks.rows.length;
+	immutable total_bookmarks = db.execute(`select count(*) from bookmarks`).oneValue!long;
+	immutable bookmarks_without_direct_icons = db.execute(`select count(*) from bookmarks_without_direct_icons`).oneValue!long;
+	immutable bookmarks_without_any_icons = db.execute(`select count(*) from bookmarks_without_any_icons`).oneValue!long;
 	if (verboseOutput)
 	{
-		terminal.writefln("%d bookmarks found.", total);
+		terminal.writeln("Total bookmarks: ", total_bookmarks);
+		terminal.writeln("Bookmarks without direct icons: ", bookmarks_without_direct_icons);
+		terminal.writeln("Bookmarks without any icons: ", bookmarks_without_any_icons);
+		terminal.writeln();
 		terminal.flush();
 	}
 	
-	bool iconExists(string fixed_icon_url, ulong fixed_icon_url_hash)
+	CachedResults getDirectIconsOfPage(string page_url, ulong page_url_hash)
 	{
-		synchronized (faviconsMutex)
+		synchronized (dbMutex)
 		{
-			int iconCount = favicons.execute(`
-				select count(*)
-				from moz_icons
-				where fixed_icon_url_hash = ? and fixup_url(icon_url) = ? and root = 1`,
-				fixed_icon_url_hash, fixed_icon_url).oneValue!int;
-			if (iconCount > 0)
-				return true;
+			return db.execute(`
+				select moz_icons.id, moz_icons.icon_url, moz_icons.fixed_icon_url_hash, moz_icons.width
+				from moz_pages_w_icons, moz_icons_to_pages, moz_icons
+				where
+					moz_pages_w_icons.page_url_hash = ?
+					and moz_pages_w_icons.page_url = ?
+					and moz_pages_w_icons.id = moz_icons_to_pages.page_id
+					and moz_icons_to_pages.icon_id = moz_icons.id`,
+				page_url_hash, page_url
+			).cached;
 		}
-		
-		return false;
 	}
 	
-	bool hasRootIcon(string page_url)
+	CachedResults getIconsByURL(string icon_url, ulong fixed_icon_url_hash = 0)
 	{
-		// No page specific favicon in database, check if root favicon exists
+		if (fixed_icon_url_hash == 0)
+			fixed_icon_url_hash = hashURL(fixupURL(icon_url));
+		synchronized (dbMutex)
+		{
+			return db.execute(`
+				select id, icon_url, fixed_icon_url_hash, width, root
+				from moz_icons
+				where
+					fixed_icon_url_hash = ?
+					and icon_url = ?`,
+				fixed_icon_url_hash, icon_url
+			).cached;
+		}
+	}
+	
+	bool iconExists(string icon_url, ulong fixed_icon_url_hash = 0)
+	{
+		if (fixed_icon_url_hash == 0)
+			fixed_icon_url_hash = hashURL(fixupURL(icon_url));
+		synchronized (dbMutex)
+		{
+			return db.execute(`
+				select exists (
+					select *
+					from moz_icons
+					where
+						fixed_icon_url_hash = ?
+						and icon_url = ?
+				)`,
+				fixed_icon_url_hash, icon_url
+			).oneValue!bool;
+		}
+	}
+	
+	bool pageHasRootIcon(string page_url)
+	{
 		Uri uri = Uri(page_url);
 		Uri rootFaviconURI = Uri("/favicon.ico").basedOn(uri);
-		rootFaviconURI.query = null;
-		rootFaviconURI.fragment = null;
 		string rootFaviconURL = rootFaviconURI.toString();
+		string fixedRootFaviconURL = fixupURL(rootFaviconURL);
+		ulong fixedRootFaviconURLHash = hashURL(fixedRootFaviconURL);
 		
-		string fixedURL = fixupURL(rootFaviconURL);
-		
-		synchronized (faviconsMutex)
+		synchronized (dbMutex)
 		{
-			int iconCount = favicons.execute(`
-				select count(*)
-				from moz_icons
-				where fixed_icon_url_hash = ? and fixup_url(icon_url) = ? and root = 1`,
-				hashURL(fixedURL), fixedURL).oneValue!int;
-			if (iconCount > 0)
-				return true;
+			return db.execute(`
+				select exists (
+					select *
+					from moz_icons
+					where
+						fixed_icon_url_hash = ?
+						and icon_url = ?
+						and root = 1
+				)`,
+				fixedRootFaviconURLHash,
+				rootFaviconURL,
+			).oneValue!bool;
 		}
-		
-		return false;
 	}
 	
-	bool hasIcon(string page_url, ulong page_url_hash)
+	bool pageHasDirectIcon(string page_url, ulong page_url_hash = 0)
 	{
-		synchronized (faviconsMutex)
+		if (page_url_hash == 0)
+			page_url_hash = hashURL(page_url);
+		synchronized (dbMutex)
 		{
-			int iconCount = favicons.execute(`
-				select count(*)
-				from moz_pages_w_icons
-				inner join moz_icons_to_pages on moz_pages_w_icons.id = moz_icons_to_pages.page_id
-				inner join moz_icons on moz_icons_to_pages.icon_id = moz_icons.id
-				where moz_pages_w_icons.page_url_hash = ? and moz_pages_w_icons.page_url = ?`,
-				page_url_hash, page_url).oneValue!int;
-			if (iconCount > 0)
-				return true;
+			return db.execute(`
+				select exists (
+					select moz_icons.*
+					from moz_pages_w_icons, moz_icons_to_pages, moz_icons
+					where
+						moz_pages_w_icons.page_url_hash = ?
+						and moz_pages_w_icons.page_url = ?
+						and moz_pages_w_icons.id = moz_icons_to_pages.page_id
+						and moz_icons_to_pages.icon_id = moz_icons.id
+				)`,
+				page_url_hash,
+				page_url,
+			).oneValue!bool;
 		}
-		
-		return hasRootIcon(page_url);
 	}
 	
-	Place[] getBookmarksWithMissingIcons()
+	bool pageHasAnyIcon(string page_url, ulong page_url_hash = 0)
 	{
-		Appender!(Place[]) result = appender!(Place[]);
-		foreach (bookmark; bookmarks)
-		{
-			Place place = Place(
-				bookmark["id"].as!int,
-				bookmark["url"].as!string,
-				bookmark["url_hash"].as!long,
-			);
-			if (!startsWith(place.url, "place:") && !hasIcon(place.url, place.url_hash))
-				result ~= place;
-		}
-		
-		return result[];
+		return pageHasDirectIcon(page_url, page_url_hash) || pageHasRootIcon(page_url);
 	}
 	
-	Place[] bookmarksWithMissingIcons = getBookmarksWithMissingIcons();
-	immutable size_t missing = bookmarksWithMissingIcons.length;
-	if (verboseOutput)
-	{
-		terminal.writefln("%d bookmarks with missing icons.\n", missing);
-		terminal.flush();
-	}
-	
-	shared size_t completed = 0;
+	immutable size_t bookmarksToProcess = forceReload ? total_bookmarks : bookmarks_without_any_icons;
+	shared size_t bookmarksProcessed = 0;
 	
 	/// Clears the current line, writes args to terminal and prints progress bar.
 	void writeWithProgress(T...)(T args)
@@ -335,7 +481,7 @@ int main(string[] args)
 				clearCurrentLine(terminal);
 				if (verboseOutput)
 					terminal.write(args);
-				printProgressBar(terminal, completed, missing);
+				printProgressBar(terminal, bookmarksProcessed, bookmarksToProcess);
 			}
 			else if (verboseOutput)
 				std.stdio.write(args);
@@ -358,14 +504,14 @@ int main(string[] args)
 				clearCurrentLine(terminal);
 				if (verboseOutput)
 					terminal.writefln(f, args);
-				printProgressBar(terminal, completed, missing);
+				printProgressBar(terminal, bookmarksProcessed, bookmarksToProcess);
 			}
 			else if (verboseOutput)
 				std.stdio.writefln(f, args);
 		}
 	}
 	
-	//favicons.setTraceCallback(
+	//db.setTraceCallback(
 	//	(string sql) {
 	//		try
 	//			writeflnWithProgress("SQLite Trace: %s", sql);
@@ -373,11 +519,21 @@ int main(string[] args)
 	//	}
 	//);
 	
+	//if (readln)
+	//	return 0;
+	
 	TaskPool taskPool = new TaskPool(jobCount);
 	taskPool.isDaemon = true;
+	auto clients = taskPool.workerLocalStorage(
+		() {
+			HttpClient client = new HttpClient();
+			client.userAgent = userAgent;
+			client.defaultTimeout = 5.seconds;
+			return client;
+		} ()
+	);
 	
-	/// Fetch favicon of given URL and insert into favicons.sqlite
-	void fetchFavicon(Place place)
+	void processBookmark(Place place)
 	{
 		if (volatileLoad(&interrupted) > 0)
 		{
@@ -385,33 +541,51 @@ int main(string[] args)
 			return;
 		}
 		
-		string url = place.url;
-		Uri uri = Uri(place.url);
-		
 		Appender!string outBuffer = appender!string;
-		scope (success)
+		scope (exit)
 		{
+			atomicOp!"+="(bookmarksProcessed, 1);
+			
 			string output = outBuffer[];
 			if (output.length > 0)
 				writelnWithProgress(output);
 		}
 		
+		enum indentation = "    ";
+		
+		void writeIndented(Args...)(int level, Args args)
+		{
+			for (int i = 0; i < level; i++)
+				outBuffer ~= indentation;
+			foreach (arg; args)
+				outBuffer ~= arg.to!string;
+		}
+		
+		void writelnIndented(Args...)(int level, Args args)
+		{
+			writeIndented(level, args, '\n');
+		}
+		
+		void writefIndented(Args...)(int level, in string fmt, Args args)
+		{
+			writeIndented(level, format(fmt, args));
+		}
+		
+		void writeflnIndented(Args...)(int level, in string fmt, Args args)
+		{
+			writelnIndented(level, format(fmt, args));
+		}
+		
+		string url = place.url;
+		Uri uri = Uri(place.url);
+		
+		HttpClient client = clients.get;
 		scope (exit)
-			atomicOp!"+="(completed, 1);
-		
-		if (hasIcon(place.url, place.url_hash))
-			return;
-		
-		HttpClient client = new HttpClient();
-		scope(exit) destroy(client);
-		client.userAgent = userAgent;
-		client.defaultTimeout = 5.seconds;
-		client.keepAlive = false;
+			client.clearCookies();
 		
 		HttpRequest pageRequest;
 		HttpResponse pageResponse;
-		int retried = 0;
-		Lretry:
+		
 		try
 		{
 			pageRequest = client.navigateTo(uri);
@@ -419,69 +593,175 @@ int main(string[] args)
 		}
 		catch (Exception ex)
 		{
-			outBuffer ~= format("%s: %s\n", url, ex.msg);
+			writeflnIndented(0, "%s: %s", url, ex.msg);
 			return;
-		}
-		finally
-			client.clearCookies();
-		
-		if (pageResponse.code == 2 && retried++ < 1)
-		{
-			// Might have ran out of file descriptors
-			// Let the GC collect leftover Socket objects
-			pageRequest.resetInternals();
-			import core.memory;
-			GC.collect();
-			goto Lretry;
 		}
 		
 		Uri finalUri = Uri(pageRequest.finalUrl);
 		
-		outBuffer ~= format("%s: %d %s\n", url, pageResponse.code, pageResponse.codeText);
+		if (uri != finalUri)
+			writeflnIndented(0, "%s -> %s", url, finalUri);
 		
-		bool faviconDone = false;
+		writeflnIndented(0, "%s: %d %s", finalUri, pageResponse.code, pageResponse.codeText);
 		
 		string mime = pageResponse.contentTypeMimeType;
 		
 		void addIconToDB(
-			string icon_url, int width, bool root, long moz_icons_expire_ms, const(ubyte)[] data,
-			string page_url, long page_url_hash,
+			string icon_url, ulong fixed_icon_url_hash, long width, bool root, long moz_icons_expire_ms, const(ubyte)[] data,
+			string page_url, ulong page_url_hash,
 			long moz_icons_to_pages_expire_ms)
 		{
-			synchronized (faviconsMutex)
+			synchronized (dbMutex)
 			{
-				int icon_id = favicons.execute(`
-					insert into moz_icons (icon_url, fixed_icon_url_hash, width, root, expire_ms, data)
-					values (?, ?, ?, ?, ?, ?)
-					returning id`,
-					icon_url,
-					hashURL(fixupURL(icon_url)),
-					width,
-					root,
-					moz_icons_expire_ms,
-					data,
-				).oneValue!int;
-				
-				if (!root)
+				try
 				{
-					int page_id = favicons.execute(`
-						insert into moz_pages_w_icons (page_url, page_url_hash)
-						values (?, ?)
-						returning id`,
-						page_url,
-						page_url_hash,
-					).oneValue!int;
-					
-					favicons.execute(`
-						insert into moz_icons_to_pages (page_id, icon_id, expire_ms)
-						values (?, ?, ?)`,
-						page_id,
-						icon_id,
-						moz_icons_to_pages_expire_ms,
+					ResultRange icon_id_range = db.execute(`
+						select moz_icons.*
+						from added_icons, moz_icons
+						where
+							added_icons.icon_id = moz_icons.id
+							and moz_icons.icon_url = ?
+							and moz_icons.fixed_icon_url_hash = ?
+							and moz_icons.width = ?`,
+						icon_url,
+						fixed_icon_url_hash,
+						width,
 					);
+					
+					long icon_id;
+					
+					if (!icon_id_range.empty)
+					{
+						icon_id = icon_id_range.front["id"].as!long;
+						
+						writeflnIndented(2,
+							"Found Icon: id: %s icon_url: %s fixed_icon_url_hash: %s width: %s root: %s expire_ms: %s",
+							icon_id,
+							icon_url,
+							fixed_icon_url_hash,
+							width,
+							icon_id_range.front["root"].as!bool,
+							icon_id_range.front["expire_ms"].as!long,
+						);
+					}
+					else
+					{
+						icon_id = db.execute(`
+							insert into moz_icons (icon_url, fixed_icon_url_hash, width, root, expire_ms, data)
+							values (?, ?, ?, ?, ?, ?)
+							returning id`,
+							icon_url,
+							fixed_icon_url_hash,
+							width,
+							root,
+							moz_icons_expire_ms,
+							data,
+						).oneValue!long;
+						
+						db.execute(`insert into added_icons (icon_id) values (?)`, icon_id);
+						
+						writeflnIndented(2,
+							"Inserted Icon: id: %s icon_url: %s fixed_icon_url_hash: %s width: %s root: %s expire_ms: %s",
+							icon_id,
+							icon_url,
+							fixed_icon_url_hash,
+							width,
+							root,
+							moz_icons_expire_ms,
+						);
+					}
+					
+					if (!root)
+					{
+						ResultRange page_id_range = db.execute(`
+							select added_pages_w_icons.page_id
+							from added_pages_w_icons, moz_pages_w_icons
+							where
+								added_pages_w_icons.page_id = moz_pages_w_icons.id
+								and moz_pages_w_icons.page_url = ?
+								and moz_pages_w_icons.page_url_hash = ?`,
+							page_url,
+							page_url_hash,
+						);
+						
+						long page_id;
+						
+						if (!page_id_range.empty)
+						{
+							page_id = page_id_range.oneValue!long;
+							
+							writeflnIndented(2,
+								"Found Page: id: %s page_url: %s page_url_hash: %s",
+								page_id,
+								page_url,
+								page_url_hash,
+							);
+						}
+						else
+						{
+							page_id = db.execute(`
+								insert into moz_pages_w_icons (page_url, page_url_hash)
+								values (?, ?)
+								returning id`,
+								page_url,
+								page_url_hash,
+							).oneValue!long;
+							
+							db.execute(`insert into added_pages_w_icons (page_id) values (?)`, page_id);
+							
+							writeflnIndented(2,
+								"Inserted Page: id: %s page_url: %s page_url_hash: %s",
+								page_id,
+								page_url,
+								page_url_hash,
+							);
+						}
+						
+						ResultRange moz_icons_to_pages_range = db.execute(`
+							select *
+							from moz_icons_to_pages
+							where
+								page_id = ?
+								and icon_id = ?`,
+							page_id,
+							icon_id,
+						);
+						
+						if (!moz_icons_to_pages_range.empty)
+						{
+							writeflnIndented(2,
+								"Found Icon-to-Page: page_id: %s icon_id: %s expire_ms: %s",
+								page_id,
+								icon_id,
+								moz_icons_to_pages_range.front["expire_ms"].as!long,
+							);
+						}
+						else
+						{
+							db.execute(`
+								insert into moz_icons_to_pages (page_id, icon_id, expire_ms)
+								values (?, ?, ?)`,
+								page_id,
+								icon_id,
+								moz_icons_to_pages_expire_ms,
+							);
+							
+							writeflnIndented(2,
+								"Inserted Icon-to-Page: page_id: %s icon_id: %s",
+								page_id,
+								icon_id,
+							);
+						}
+					}
+				}
+				catch (Exception ex)
+				{
+					writeflnIndented(2, "%s", ex.msg);
 				}
 			}
 		}
+		
+		bool checkRoot = true;
 		
 		if (pageResponse.content.length > 0)
 		{
@@ -494,168 +774,135 @@ int main(string[] args)
 				return;
 			
 			SysTime pageExpire = calculateExpirationOfResponse(pageResponse);
-			long pageExpireMS = pageExpire.toUnixTime * 1000;
+			long pageExpireMS = pageExpire.toUnixTime!long * 1000;
 			
-			Element[] iconLinks = doc.querySelectorAll("link[rel~=icon]");
+			Element[] directIconLinks = doc.querySelectorAll("link[rel~=icon]");
 			
-			if (iconLinks.length > 0)
+			foreach (directIconLink; directIconLinks)
 			{
-				LiconLinks:
-				foreach (linkIndex, iconLink; iconLinks)
+				string href = directIconLink.attrs.get("href");
+				
+				Uri absoluteIconURI = Uri(href).basedOn(finalUri);
+				string absoluteIconURL = absoluteIconURI.toString;
+				string fixedAbsoluteIconURL = fixupURL(absoluteIconURL);
+				ulong fixedAbsoluteIconURLHash = hashURL(fixedAbsoluteIconURL);
+				
+				bool isRoot = absoluteIconURL == Uri("/favicon.ico").basedOn(finalUri);
+				
+				if (isRoot)
+					checkRoot = false;
+				
+				HttpRequest iconRequest;
+				HttpResponse iconResponse;
+				try
 				{
-					outBuffer ~= format("    %s\n", iconLink);
-					string href = iconLink.attrs.get("href");
-					
-					Uri absoluteIconURI = Uri(href).basedOn(finalUri);
-					string absoluteIconURL = absoluteIconURI.toString;
-					string fixedAbsoluteIconURL = fixupURL(absoluteIconURL);
-					ulong absoluteIconURLHash = hashURL(fixedAbsoluteIconURL);
-					
-					CachedResults faviconsWithURL;
-					synchronized (faviconsMutex)
-						faviconsWithURL = cached(getFaviconWithURL(fixedAbsoluteIconURL, absoluteIconURLHash, false));
-					
-					if (faviconsWithURL.rows.length > 0)
-					{
-						// If the icon exists already, connect it with this url
-						long finalUrlHash = hashURL(pageRequest.finalUrl);
-						
-						CachedResults faviconsOfPage;
-						synchronized (faviconsMutex)
-							faviconsOfPage = cached(getFaviconsOfPage(pageRequest.finalUrl, finalUrlHash));
-						
-						int page_id;
-						
-						if (faviconsOfPage.rows.length > 0)
+					iconRequest = client.navigateTo(absoluteIconURI);
+					iconResponse = iconRequest.waitForCompletion();
+				}
+				catch (Exception ex)
+				{
+					writeflnIndented(1, "%s: %s", directIconLink, ex.msg);
+					continue;
+				}
+				
+				writeflnIndented(1, "%s: %d %s", directIconLink, iconResponse.code, iconResponse.codeText);
+				
+				if (!iconResponse.wasSuccessful)
+					continue;
+				
+				string iconMime = iconResponse.contentTypeMimeType;
+				
+				SysTime iconExpire = calculateExpirationOfResponse(iconResponse);
+				long iconExpireMS = iconExpire.toUnixTime!long * 1000;
+				switch (iconMime)
+				{
+					case "image/vnd.microsoft.icon":
+					case "image/x-icon":
+						try
 						{
-							page_id = faviconsOfPage.rows[0]["id"].as!int;
-						}
-						else
-						{
-							synchronized (faviconsMutex)
+							MemoryImage[] icons = loadIcoFromMemory(iconResponse.content);
+							foreach (i, icon; icons)
 							{
-								page_id = favicons.execute(`
-									insert into moz_pages_w_icons (page_url, page_url_hash)
-									values (?, ?)
-									returning id`,
-									pageRequest.finalUrl,
-									finalUrlHash,
-								).oneValue!int;
-							}
-						}
-						
-						foreach (fav; faviconsWithURL)
-						{
-							synchronized (faviconsMutex)
-							{
-								favicons.execute(`
-									insert into moz_icons_to_pages (page_id, icon_id, expire_ms)
-									values (?, ?, ?)`,
-									page_id,
-									fav["id"].as!int,
+								if (icon is null)
+								{
+									writeflnIndented(2, "Failed to read icon [%d]", i);
+									continue;
+								}
+								ubyte[] png = writePngToMemory(icon);
+								addIconToDB(
+									absoluteIconURL, fixedAbsoluteIconURLHash, icon.width, isRoot, iconExpireMS, png,
+									url, place.url_hash,
 									pageExpireMS,
 								);
+								checkRoot = false;
 							}
-						}
-						
-						faviconDone = true;
-					}
-					else
-					{
-						HttpRequest iconRequest;
-						HttpResponse iconResponse;
-						try
-						{
-							iconRequest = client.navigateTo(absoluteIconURI);
-							iconResponse = iconRequest.waitForCompletion();
 						}
 						catch (Exception ex)
 						{
-							outBuffer ~= format("    %s: %s\n", url, ex.msg);
-							continue LiconLinks;
+							writeflnIndented(2, "Failed to read icon: %s", ex.msg);
 						}
-						finally
-							client.clearCookies();
-						
-						outBuffer ~= format("        %s: %d %s\n", absoluteIconURL, iconResponse.code, iconResponse.codeText);
-						
-						if (!iconResponse.wasSuccessful)
-							continue;
-						
-						string iconMime = iconResponse.contentTypeMimeType;
+						break;
+					case "image/png":
 						try
 						{
-							SysTime iconExpire = calculateExpirationOfResponse(iconResponse);
-							long iconExpireMS = iconExpire.toUnixTime * 1000;
-							switch (iconMime)
+							MemoryImage image = readPngFromBytes(iconResponse.content);
+							if (image is null)
 							{
-								case "image/vnd.microsoft.icon":
-								case "image/x-icon":
-									MemoryImage[] icons = loadIcoFromMemory(iconResponse.content);
-									foreach (i, icon; icons)
-									{
-										if (icon is null)
-										{
-											outBuffer ~= format("Failed to read icon %d from url: %s\n", i, absoluteIconURL);
-											continue;
-										}
-										ubyte[] png = writePngToMemory(icon);
-										addIconToDB(
-											absoluteIconURL, icon.width, false, iconExpireMS, png,
-											url, place.url_hash,
-											pageExpireMS,
-										);
-										faviconDone = true;
-									}
-									break;
-								case "image/png":
-									MemoryImage image = readPngFromBytes(iconResponse.content);
-									if (image is null)
-										throw new Exception("Failed to read png image.");
-									ubyte[] png = writePngToMemory(image);
-									addIconToDB(
-										absoluteIconURL, image.width, false, iconExpireMS, png,
-										url, place.url_hash,
-										pageExpireMS,
-									);
-									faviconDone = true;
-									break;
-								case "image/jpeg":
-									MemoryImage image = readJpegFromMemory(iconResponse.content);
-									if (image is null)
-										throw new Exception("Failed to read jpeg image.");
-									ubyte[] png = writePngToMemory(image);
-									addIconToDB(
-										absoluteIconURL, image.width, false, iconExpireMS, png,
-										url, place.url_hash,
-										pageExpireMS,
-									);
-									faviconDone = true;
-									break;
-								case "image/svg+xml":
-									ubyte[] svg = iconResponse.content;
-									addIconToDB(
-										absoluteIconURL, ushort.max, false, iconExpireMS, svg,
-										url, place.url_hash,
-										pageExpireMS,
-									);
-									faviconDone = true;
-									break;
-								default:
-									outBuffer ~= format("    Unsupported mime type %s for %s\n", iconMime, absoluteIconURL);
-									break;
+								writeflnIndented(2, "Failed to read png image");
+								continue;
 							}
+							ubyte[] png = writePngToMemory(image);
+							addIconToDB(
+								absoluteIconURL, fixedAbsoluteIconURLHash, image.width, isRoot, iconExpireMS, png,
+								url, place.url_hash,
+								pageExpireMS,
+							);
+							checkRoot = false;
 						}
 						catch (Exception ex)
 						{
-							outBuffer ~= format("        %s: %s\n", absoluteIconURL, ex.msg);
+							writeflnIndented(2, "Failed to read png image: %s", ex.msg);
 						}
-					}
+						break;
+					case "image/jpeg":
+						try
+						{
+							MemoryImage image = readJpegFromMemory(iconResponse.content);
+							if (image is null)
+							{
+								writeflnIndented(2, "Failed to read jpeg image");
+								continue;
+							}
+							ubyte[] png = writePngToMemory(image);
+							addIconToDB(
+								absoluteIconURL, fixedAbsoluteIconURLHash, image.width, isRoot, iconExpireMS, png,
+								url, place.url_hash,
+								pageExpireMS,
+							);
+							checkRoot = false;
+						}
+						catch (Exception ex)
+						{
+							writeflnIndented(2, "Failed to read jpeg image: %s", ex.msg);
+						}
+						break;
+					case "image/svg+xml":
+						ubyte[] svg = iconResponse.content;
+						addIconToDB(
+							absoluteIconURL, fixedAbsoluteIconURLHash, ushort.max, isRoot, iconExpireMS, svg,
+							url, place.url_hash,
+							pageExpireMS,
+						);
+						checkRoot = false;
+						break;
+					default:
+						writeflnIndented(2, "Unsupported mime type %s", iconMime);
+						break;
 				}
 			}
 		}
 		
-		if (faviconDone)
+		if (!checkRoot)
 			return;
 		
 		// Some dipshits use TLS fingerprinting to stop web scrapers
@@ -664,101 +911,103 @@ int main(string[] args)
 		// doesn't work reliably.
 		
 		Uri rootFaviconURI = Uri("/favicon.ico").basedOn(uri);
-		rootFaviconURI.query = null;
-		rootFaviconURI.fragment = null;
 		string rootFaviconURL = rootFaviconURI.toString();
 		
-		string fixedRootIconURL = fixupURL(rootFaviconURL);
-		ulong rootIconURLHash = hashURL(fixedRootIconURL);
+		string fixedRootFaviconURL = fixupURL(rootFaviconURL);
+		ulong fixedRootFaviconURLHash = hashURL(fixedRootFaviconURL);
 		
-		CachedResults rootFaviconsWithURL;
-		synchronized (faviconsMutex)
-			rootFaviconsWithURL = cached(getFaviconWithURL(fixedRootIconURL, rootIconURLHash, true));
+		if (!forceReload && !iconExists(rootFaviconURL, fixedRootFaviconURLHash))
+			return;
 		
-		if (!iconExists(fixedRootIconURL, rootIconURLHash))
+		HttpRequest rootFaviconRequest;
+		HttpResponse rootFaviconResponse;
+		try
 		{
-			HttpRequest rootFaviconRequest;
-			HttpResponse rootFaviconResponse;
-			try
-			{
-				rootFaviconRequest = client.navigateTo(rootFaviconURI);
-				rootFaviconResponse = rootFaviconRequest.waitForCompletion();
-			}
-			catch (Exception ex)
-			{
-				outBuffer ~= format("    %s: %s\n", url, ex.msg);
-				return;
-			}
-			
-			outBuffer ~= format("    %s: %d %s\n", rootFaviconURL, rootFaviconResponse.code, rootFaviconResponse.codeText);
-			
-			if (!rootFaviconResponse.wasSuccessful)
-				return;
-			
-			SysTime iconExpire = calculateExpirationOfResponse(rootFaviconResponse);
-			long iconExpireMS = iconExpire.toUnixTime * 1000;
-			
-			string iconMime = rootFaviconResponse.contentTypeMimeType;
-			switch (iconMime)
-			{
-				case "image/vnd.microsoft.icon":
-				case "image/x-icon":
-					try
+			rootFaviconRequest = client.navigateTo(rootFaviconURI);
+			rootFaviconResponse = rootFaviconRequest.waitForCompletion();
+		}
+		catch (Exception ex)
+		{
+			writeflnIndented(1, "(root) %s: %s", rootFaviconURL, ex.msg);
+			return;
+		}
+		
+		writeflnIndented(1, "(root) %s: %d %s", rootFaviconURL, rootFaviconResponse.code, rootFaviconResponse.codeText);
+		
+		if (!rootFaviconResponse.wasSuccessful)
+			return;
+		
+		SysTime iconExpire = calculateExpirationOfResponse(rootFaviconResponse);
+		long iconExpireMS = iconExpire.toUnixTime!long * 1000;
+		
+		string iconMime = rootFaviconResponse.contentTypeMimeType;
+		switch (iconMime)
+		{
+			case "image/vnd.microsoft.icon":
+			case "image/x-icon":
+				try
+				{
+					MemoryImage[] icons = loadIcoFromMemory(rootFaviconResponse.content);
+					foreach (i, icon; icons)
 					{
-						MemoryImage[] icons = loadIcoFromMemory(rootFaviconResponse.content);
-						foreach (i, icon; icons)
+						if (icon is null)
 						{
-							if (icon is null)
-							{
-								outBuffer ~= format("Failed to read icon %d from url: %s\n", i, rootFaviconURL);
-								continue;
-							}
-							ubyte[] png = writePngToMemory(icon);
-							addIconToDB(
-								rootFaviconURL, icon.width, true, iconExpireMS, png,
-								null, 0,
-								0,
-							);
+							writeflnIndented(2, "Failed to read icon [%d]", i);
+							continue;
 						}
-					}
-					catch (Exception ex)
-					{
-						if (rootFaviconResponse.content.startsWith(pngMagicBytes))
-							// Some websites seriously put a png image named as favicon.ico
-							// Total bullshit.
-							goto case "image/png";
-					}
-					break;
-				case "image/png":
-					try
-					{
-						MemoryImage image = readPngFromBytes(rootFaviconResponse.content);
-						if (image is null)
-							throw new Exception("Failed to read png image.");
-						ubyte[] png = writePngToMemory(image);
+						ubyte[] png = writePngToMemory(icon);
 						addIconToDB(
-							rootFaviconURL, image.width, true, iconExpireMS, png,
+							rootFaviconURL, fixedRootFaviconURLHash, icon.width, true, iconExpireMS, png,
 							null, 0,
 							0,
 						);
 					}
-					catch (Exception ex)
+				}
+				catch (Exception ex)
+				{
+					if (rootFaviconResponse.content.startsWith(pngMagicBytes))
+						// Some websites seriously put a png image named as favicon.ico
+						// Total bullshit.
+						goto case "image/png";
+					else
+						writeflnIndented(2, "Failed to read icon: %s", ex.msg);
+				}
+				break;
+			case "image/png":
+				try
+				{
+					MemoryImage image = readPngFromBytes(rootFaviconResponse.content);
+					if (image is null)
 					{
-						outBuffer ~= format("        %s: %s\n", rootFaviconURL, ex.msg);
+						writeflnIndented(2, "Failed to read png image");
 					}
-					break;
-				case "text/html":
-				case "application/xhtml+xml":
-					// Some websites redirect to their home page instead of giving you 404
-					break;
-				default:
-					outBuffer ~= format("    Unexpected mimetype %s for %s\n", iconMime, rootFaviconURL);
-					break;
-			}
+					ubyte[] png = writePngToMemory(image);
+					addIconToDB(
+						rootFaviconURL, fixedRootFaviconURLHash, image.width, true, iconExpireMS, png,
+						null, 0,
+						0,
+					);
+				}
+				catch (Exception ex)
+				{
+					writeflnIndented(2, "Failed to read png image: %s", ex.msg);
+				}
+				break;
+			case "text/html":
+			case "application/xhtml+xml":
+				// Some websites redirect to their home page instead of giving you 404
+				break;
+			default:
+				writeflnIndented(2, "Unexpected mimetype %s", iconMime);
+				break;
 		}
 	}
 	
-	foreach (bookmark; bookmarksWithMissingIcons)
+	ResultRange bookmarks = forceReload ?
+		db.execute(`select id, url, url_hash from bookmarks`) :
+		db.execute(`select id, url, url_hash from bookmarks_without_any_icons`);
+	
+	foreach (bookmark; bookmarks)
 	{
 		if (volatileLoad(&interrupted) > 0)
 		{
@@ -766,7 +1015,12 @@ int main(string[] args)
 			break;
 		}
 		
-		taskPool.put(task(&fetchFavicon, bookmark));
+		Place place = Place(
+			bookmark["id"].as!long,
+			bookmark["url"].as!string,
+			bookmark["url_hash"].as!ulong,
+		);
+		taskPool.put(task(&processBookmark, place));
 	}
 	
 	taskPool.finish(true);
@@ -778,21 +1032,6 @@ int main(string[] args)
 	}
 	
 	return 0;
-}
-
-struct Place
-{
-	int id;
-	string url;
-	long url_hash;
-}
-
-struct Favicon
-{
-	int id;
-	string icon_url;
-	long fixed_icon_url_hash;
-	int width;
 }
 
 SysTime calculateExpirationOfResponse(ref HttpResponse response, Nullable!SysTime relativeTo = Nullable!SysTime.init)
@@ -834,7 +1073,7 @@ SysTime calculateExpirationOfResponse(ref HttpResponse response, Nullable!SysTim
 				try
 				{
 					age = (*_age).to!long;
-					return SysTime.fromUnixTime(time.toUnixTime + maxAge - age);
+					return SysTime.fromUnixTime(time.toUnixTime!long + maxAge - age);
 				}
 				catch (ConvException) { }
 			}
@@ -858,5 +1097,18 @@ SysTime calculateExpirationOfResponse(ref HttpResponse response, Nullable!SysTim
 			return lastModified + ((date - lastModified) * 11 / 10);
 		}
 	}
-	return SysTime.init;
+	
+	// Not sure but it seems like Firefox defaults to 7 days if there is no cache info
+	return time + 7.days;
+}
+
+string findAvailableFilename(const(char)[] folder, const(char)[] name, const(char)[] extension, size_t limit = 256)
+{
+	for (size_t i = 1; i <= limit; i++)
+	{
+		string filename = buildPath(folder, text(name, '-', i, extension));
+		if (!exists(filename))
+			return filename;
+	}
+	return buildPath(folder, text(name, '-', 256, extension));
 }
