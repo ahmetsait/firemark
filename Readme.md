@@ -2,7 +2,7 @@
 
 ![Firemark Icon](icon.svg)  
 Firemark  
-[![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20linux-blue)](https://github.com/ahmetsait/firemark/releases) [![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark)](https://github.com/ahmetsait/firemark/releases/latest) [![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total)](https://github.com/ahmetsait/firemark/releases) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt)
+[![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20linux-blue)](https://github.com/ahmetsait/firemark/releases) [![Latest Release](https://img.shields.io/github/v/release/ahmetsait/firemark)](https://github.com/ahmetsait/firemark/releases/latest) [![Downloads](https://img.shields.io/github/downloads/ahmetsait/firemark/total)](https://github.com/ahmetsait/firemark/releases) [![License](https://img.shields.io/github/license/ahmetsait/firemark)](LICENSE.txt) [![Sponsor](https://img.shields.io/badge/Sponsor-black?logo=githubsponsors)](https://github.com/sponsors/ahmetsait)
 ========
 </div>
 
